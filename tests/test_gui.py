@@ -3,6 +3,7 @@ from PySide6.QtGui import QCloseEvent
 
 from visual_macro.gui import ActionBuilder, ActionDialog, MainWindow, RuleDialog
 from visual_macro.models import Profile, Rule
+from visual_macro.storage import ApplicationStorage
 
 
 def test_action_dialog_edits_existing_profile_action_shape(qapp) -> None:
@@ -137,6 +138,85 @@ def test_window_shutdown_requests_stop_and_waits(qapp) -> None:
     assert worker.stopped and worker.waited
     assert event.isAccepted()
     window.worker = None
+    window.close()
+
+
+def test_captured_template_is_saved_to_managed_storage_after_preview_confirmation(
+    qapp, monkeypatch, tmp_path
+) -> None:
+    import numpy as np
+    from PySide6.QtWidgets import QDialog
+    import visual_macro.gui as gui_module
+
+    storage = ApplicationStorage(tmp_path / "managed")
+
+    class FakeOverlay:
+        screen_rect = (0, 0, 12, 8)
+
+        def __init__(self, *_args):
+            pass
+
+        def exec(self):
+            return QDialog.DialogCode.Accepted
+
+    monkeypatch.setattr(gui_module.ScreenCoordinateMapper, "from_desktop", lambda: object())
+    monkeypatch.setattr(gui_module, "ScreenRegionOverlay", FakeOverlay)
+    monkeypatch.setattr(
+        gui_module,
+        "capture_screen_region",
+        lambda _rect: np.full((8, 12, 3), 123, dtype=np.uint8),
+    )
+    monkeypatch.setattr(QDialog, "exec", lambda _dialog: QDialog.DialogCode.Accepted)
+    dialog = RuleDialog(storage=storage)
+
+    dialog._capture_template()
+
+    image_path = __import__("pathlib").Path(dialog.template_path)
+    assert image_path.parent == storage.templates_dir
+    assert image_path.name.startswith("New-rule-")
+    assert image_path.is_file()
+    dialog.close()
+
+
+def test_import_image_copies_to_managed_templates(qapp, monkeypatch, tmp_path) -> None:
+    import cv2
+    import numpy as np
+    from PySide6.QtWidgets import QFileDialog
+
+    source = tmp_path / "external.png"
+    cv2.imwrite(str(source), np.zeros((10, 10), dtype=np.uint8))
+    storage = ApplicationStorage(tmp_path / "managed")
+    monkeypatch.setattr(QFileDialog, "getOpenFileName", lambda *_args: (str(source), ""))
+    dialog = RuleDialog(storage=storage)
+
+    dialog._import_template()
+
+    assert __import__("pathlib").Path(dialog.template_path).parent == storage.templates_dir
+    assert dialog.filename_label.text().startswith("external-")
+    dialog.close()
+
+
+def test_last_managed_profile_is_restored_after_window_restart(qapp, tmp_path) -> None:
+    from visual_macro.models import save_profile
+
+    storage = ApplicationStorage(tmp_path / "managed")
+    template = storage.store_capture(
+        __import__("numpy").zeros((5, 5, 3), dtype="uint8"), "Button"
+    )
+    profile_path = storage.profiles_dir / "last.json"
+    profile = Profile(
+        interval=2.5,
+        simulation=True,
+        rules=[Rule(id="button", name="Button", template_path=str(template))],
+    )
+    save_profile(profile, profile_path)
+    storage.save_settings({"version": 1, "last_profile": str(profile_path)})
+
+    window = MainWindow(storage=storage)
+
+    assert window.profile_path == profile_path
+    assert window.interval_input.value() == 2.5
+    assert window.rules[0].id == "button"
     window.close()
 
 

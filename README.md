@@ -37,6 +37,17 @@ Or, after installing, use `visual-macro`.
 
 The activity log can be collapsed without losing its contents. A rule triggers on an absent-to-present transition; it must disappear before another trigger unless repeat is enabled. Repeat rules may trigger again after their cooldown while the match remains present.
 
+## Managed application data
+
+On Windows, application data is stored under `%LOCALAPPDATA%\VisualMacroAutomation` (falling back to `%APPDATA%` if needed). It contains:
+
+- `templates/` — validated imported images and captured templates with unique filenames derived from their friendly names.
+- `profiles/` — the suggested location for new profiles; profiles saved here refer to managed templates with stable relative paths.
+- `logs/activity.log` — persistent application activity.
+- `settings.json` — application settings and the last successfully loaded/saved profile path for restart recovery.
+
+Captured templates are previewed and confirmed before being saved, and are saved directly in `templates/` without a filesystem-path prompt. **Import Image…** separately copies and validates an external image into managed storage. Existing profiles with absolute template paths continue to load; loading them does not copy, move, or delete their source files. Missing last-used profiles and unreadable settings are reported without deleting or replacing user data. The non-Windows development fallback is `$XDG_DATA_HOME/visual-macro-automation` or `~/.local/share/visual-macro-automation`.
+
 ## Profile format
 
 Profiles use version 1 JSON. A minimal example:
@@ -92,6 +103,19 @@ Run the automated suite with:
 python -m pytest
 ```
 
+## Manual validation checklist
+
+These checks require an interactive Windows desktop. They have **not been run automatically or manually in this environment**; record results on the target machine:
+
+- [ ] Move and resize the application while monitoring; confirm controls, thumbnails, and activity log remain usable.
+- [ ] On each display-scaling setting and with monitors on both sides of the primary (including a negative-origin monitor), select a region and compare displayed coordinates/dimensions with the intended physical pixels.
+- [ ] Test two similar-looking icons, then partially occlude each; verify thresholds avoid unintended triggers and observe confidence/location logs.
+- [ ] Make a template appear and disappear faster than the capture interval; verify the expected sampling/trigger behavior and repeat/cooldown semantics.
+- [ ] Capture and import templates, save multiple profiles, restart the application, and verify managed files and the last profile recover without moving/deleting source images.
+- [ ] Stop during a long wait and during a multi-action macro; verify no later action runs after the current in-progress OS input returns.
+- [ ] Close the application during monitoring and confirm it exits cleanly without leaving an active worker.
+- [ ] Keep simulation mode enabled for dry runs. Only separately verify live clicks on a harmless target after confirming the simulated coordinates.
+
 ## Limitations and troubleshooting
 
 - Template matching is pixel-based; choose a crop that is distinctive and at the same scale and appearance as it will have on screen. Animations, scaling, theme changes, and overlays can reduce confidence.
@@ -101,3 +125,4 @@ python -m pytest
 - Long configured delays are interruptible when stopping the worker. A currently executing system input call must return before shutdown finishes.
 - If no match is reported, try a tighter template crop, check the configured region, and lower the confidence threshold gradually. If startup reports an image error, verify the template path and image format.
 - Run the tests without a desktop using `python -m pytest`; actual capture, real input, and visual match quality require manual testing in an interactive Windows session.
+- Mixed-DPI physical coordinate mapping is covered by synthetic automated cases but still needs validation on the actual monitor arrangement. Persistent storage write failures are reported in the activity panel; check permissions and available disk space under the app-data directory.

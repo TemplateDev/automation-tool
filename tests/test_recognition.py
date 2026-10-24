@@ -1,5 +1,6 @@
 import cv2
 import numpy as np
+import pytest
 
 from visual_macro.models import Rule
 from visual_macro.recognition import TemplateMatcher
@@ -65,3 +66,31 @@ def test_matcher_reports_absence_below_threshold(tmp_path) -> None:
 
     assert not result.matched
     assert result.location is None
+
+
+def test_matcher_reports_missing_and_invalid_templates(tmp_path) -> None:
+    matcher = TemplateMatcher()
+    missing = Rule(id="missing", name="Missing", template_path=str(tmp_path / "missing.png"))
+    with pytest.raises(FileNotFoundError, match="was not found"):
+        matcher.match(np.zeros((20, 20, 3), dtype=np.uint8), missing)
+
+    invalid_path = tmp_path / "invalid.png"
+    invalid_path.write_bytes(b"invalid image bytes")
+    invalid = Rule(id="invalid", name="Invalid", template_path=str(invalid_path))
+    with pytest.raises(ValueError, match="not a readable image"):
+        matcher.match(np.zeros((20, 20, 3), dtype=np.uint8), invalid)
+
+
+def test_matcher_does_not_return_location_when_confidence_is_below_threshold(tmp_path) -> None:
+    rng = np.random.default_rng(91)
+    template = rng.integers(0, 255, size=(7, 8), dtype=np.uint8)
+    path = tmp_path / "template.png"
+    cv2.imwrite(str(path), template)
+    rule = Rule(id="target", name="Target", template_path=str(path), threshold=1.0)
+
+    result = TemplateMatcher().match(np.zeros((25, 25, 3), dtype=np.uint8), rule)
+
+    assert result.confidence < 1.0
+    assert not result.matched
+    assert result.location is None
+    assert result.bbox is None

@@ -52,6 +52,7 @@ from visual_macro.desktop import (
 )
 from visual_macro.region_picker import ScreenRegionOverlay
 from visual_macro.worker import MacroWorker
+from visual_macro.storage import ApplicationStorage, StorageError
 
 
 class ActionDialog(QDialog):
@@ -310,11 +311,18 @@ class ActionBuilder(QWidget):
 
 
 class RuleDialog(QDialog):
-    def __init__(self, parent=None, rule: Rule | None = None, template_path: str = "") -> None:
+    def __init__(
+        self,
+        parent=None,
+        rule: Rule | None = None,
+        template_path: str = "",
+        storage: ApplicationStorage | None = None,
+    ) -> None:
         super().__init__(parent)
         self.setWindowTitle("Edit Rule" if rule else "Add Rule")
         self.resize(620, 700)
         self._rule_id = rule.id if rule else str(uuid.uuid4())
+        self.storage = storage or ApplicationStorage()
         self._error_label = QLabel()
         self._error_label.setObjectName("rule_error")
         self._error_label.setStyleSheet("color: #ff8178;")
@@ -327,8 +335,8 @@ class RuleDialog(QDialog):
         self.thumbnail.setStyleSheet("background: #20252d; border: 1px solid #3c424c;")
         self.filename_label = QLabel()
         self.filename_label.setWordWrap(True)
-        self.choose_image_button = QPushButton("Choose Image…")
-        self.choose_image_button.clicked.connect(self._browse_template)
+        self.choose_image_button = QPushButton("Import Image…")
+        self.choose_image_button.clicked.connect(self._import_template)
         self.capture_template_button = QPushButton("Capture Template…")
         self.capture_template_button.clicked.connect(self._capture_template)
 
@@ -465,15 +473,20 @@ class RuleDialog(QDialog):
             self.thumbnail.setPixmap(QPixmap())
             self.thumbnail.setText("Preview unavailable")
 
-    def _browse_template(self) -> None:
+    def _import_template(self) -> None:
         path, _ = QFileDialog.getOpenFileName(
             self,
-            "Choose image template",
+            "Import image template",
             self.template_path,
             "Image files (*.png *.jpg *.jpeg *.bmp *.webp);;All files (*.*)",
         )
         if path:
-            self.template_path = path
+            try:
+                managed_path = self.storage.import_image(path)
+            except StorageError as exc:
+                self._error_label.setText(str(exc))
+                return
+            self.template_path = str(managed_path)
             self._update_image()
             if not self.name_input.text().strip() or self.name_input.text() == "New rule":
                 self.name_input.setText(Path(path).stem)
@@ -527,6 +540,8 @@ class RuleDialog(QDialog):
         preview_dialog = QDialog(self)
         preview_dialog.setWindowTitle("Preview Template Capture")
         preview_dialog.resize(640, 520)
+        friendly_name = QLineEdit(self.name_input.text().strip() or "Captured template")
+        friendly_name.setPlaceholderText("Friendly template name")
         preview_label = QLabel()
         preview_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         preview_label.setPixmap(
@@ -537,40 +552,31 @@ class RuleDialog(QDialog):
                 Qt.TransformationMode.SmoothTransformation,
             )
         )
-        preview_buttons = QDialogButtonBox(
-            QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel
-        )
-        preview_buttons.accepted.connect(preview_dialog.accept)
-        preview_buttons.rejected.connect(preview_dialog.reject)
+        preview_buttons = QHBoxLayout()
+        confirm_save = QPushButton("Save to Application Templates")
+        cancel_save = QPushButton("Cancel")
+        preview_buttons.addStretch(1)
+        preview_buttons.addWidget(confirm_save)
+        preview_buttons.addWidget(cancel_save)
+        confirm_save.clicked.connect(preview_dialog.accept)
+        cancel_save.clicked.connect(preview_dialog.reject)
         preview_layout = QVBoxLayout(preview_dialog)
         preview_layout.addWidget(QLabel(f"Captured template: {width} × {height} pixels"))
+        preview_layout.addWidget(QLabel("Friendly name"))
+        preview_layout.addWidget(friendly_name)
         preview_layout.addWidget(preview_label, 1)
-        preview_layout.addWidget(preview_buttons)
+        preview_layout.addLayout(preview_buttons)
         if preview_dialog.exec() != QDialog.DialogCode.Accepted:
             return
-
-        path, _ = QFileDialog.getSaveFileName(
-            self,
-            "Save captured template",
-            self.template_path,
-            "PNG image (*.png);;JPEG image (*.jpg *.jpeg);;Bitmap image (*.bmp)",
-        )
-        if not path:
-            return
-        if not Path(path).suffix:
-            path += ".png"
         try:
-            saved = cv2.imwrite(path, image)
-        except cv2.error as exc:
-            self._error_label.setText(f"Could not save captured template: {exc}")
+            saved_path = self.storage.store_capture(image, friendly_name.text())
+        except StorageError as exc:
+            self._error_label.setText(str(exc))
             return
-        if not saved:
-            self._error_label.setText(f"Could not save captured template: {path}")
-            return
-        self.template_path = str(Path(path).resolve())
+        self.template_path = str(saved_path)
         self._update_image()
         if not self.name_input.text().strip() or self.name_input.text() == "New rule":
-            self.name_input.setText(Path(path).stem)
+            self.name_input.setText(friendly_name.text().strip() or saved_path.stem)
 
     def _build_rule(self) -> Rule:
         region = None
@@ -606,7 +612,7 @@ class RuleDialog(QDialog):
 
 
 class MainWindow(QMainWindow):
-    def __init__(self) -> None:
+    def __init__(self, storage: ApplicationStorage | None = None) -> None:
         super().__init__()
         self.setWindowTitle("Visual Macro Automation")
         self.resize(1060, 760)
@@ -614,6 +620,15 @@ class MainWindow(QMainWindow):
         self.profile_path: Path | None = None
         self.worker: MacroWorker | None = None
         self._has_error = False
+        self._persistent_log_error_reported = False
+        try:
+            self.storage: ApplicationStorage | None = storage or ApplicationStorage()
+            self.storage.initialize()
+        except StorageError as exc:
+            self.storage = None
+            self._storage_error = str(exc)
+        else:
+            self._storage_error = None
         self.setStyleSheet(
             """
             QMainWindow, QWidget { background: #171a1f; color: #e4e8ee; }
@@ -743,6 +758,10 @@ class MainWindow(QMainWindow):
         self._refresh_rules()
         self._set_status("Stopped")
         self._update_mode_indicator()
+        if self._storage_error:
+            self._log_error(self._storage_error)
+        else:
+            self._restore_last_profile()
 
     def _create_toolbar(self) -> None:
         toolbar = QToolBar("Profiles")
@@ -761,7 +780,7 @@ class MainWindow(QMainWindow):
         file_menu.addAction(save_action)
 
     def _add_rule(self) -> None:
-        dialog = RuleDialog(self)
+        dialog = RuleDialog(self, storage=self.storage)
         if dialog.exec() == QDialog.DialogCode.Accepted:
             rule = dialog.rule()
             self.rules.append(rule)
@@ -772,7 +791,7 @@ class MainWindow(QMainWindow):
         row = self.rule_table.currentRow() if row is None else row
         if not 0 <= row < len(self.rules):
             return
-        dialog = RuleDialog(self, self.rules[row])
+        dialog = RuleDialog(self, self.rules[row], storage=self.storage)
         if dialog.exec() == QDialog.DialogCode.Accepted:
             self.rules[row] = dialog.rule()
             self._refresh_rules()
@@ -916,13 +935,20 @@ class MainWindow(QMainWindow):
             return
         self._apply_profile(profile)
         self.profile_path = Path(path).resolve()
+        self._remember_profile()
         self._log(f"Loaded profile: {self.profile_path}")
 
     def _save_profile(self) -> None:
         path = self.profile_path
         if path is None:
+            if self.storage is None:
+                self._log_error("Application storage is unavailable; cannot save a managed profile.")
+                return
             filename, _ = QFileDialog.getSaveFileName(
-                self, "Save profile", "", "JSON profiles (*.json)"
+                self,
+                "Save profile",
+                str(self.storage.profiles_dir / "profile.json"),
+                "JSON profiles (*.json)",
             )
             if not filename:
                 return
@@ -940,7 +966,47 @@ class MainWindow(QMainWindow):
             self._log_error(f"Could not save profile: {exc}")
             return
         self.profile_path = path
+        self._remember_profile()
         self._log(f"Saved profile: {self.profile_path}")
+
+    def _remember_profile(self) -> None:
+        if self.storage is None or self.profile_path is None:
+            return
+        try:
+            settings = self.storage.load_settings()
+            settings["last_profile"] = str(self.profile_path)
+            settings["interval"] = self.interval_input.value()
+            settings["simulation"] = self.simulation_input.isChecked()
+            self.storage.save_settings(settings)
+        except StorageError as exc:
+            self._log_error(f"Profile was saved, but settings could not be updated: {exc}")
+
+    def _restore_last_profile(self) -> None:
+        if self.storage is None:
+            return
+        try:
+            settings = self.storage.load_settings()
+            stored_interval = settings.get("interval", self.interval_input.value())
+            stored_simulation = settings.get("simulation", self.simulation_input.isChecked())
+            restored_settings = Profile(
+                interval=stored_interval,
+                simulation=stored_simulation,
+            )
+            self.interval_input.setValue(restored_settings.interval)
+            self.simulation_input.setChecked(restored_settings.simulation)
+            profile_value = settings.get("last_profile")
+            if not isinstance(profile_value, str) or not profile_value:
+                return
+            path = Path(profile_value).expanduser()
+            if not path.is_file():
+                self._log_error(f"Last profile was not found; no data was removed: {path}")
+                return
+            profile = load_profile(path)
+            self._apply_profile(profile)
+            self.profile_path = path.resolve()
+            self._log(f"Restored last profile: {self.profile_path}")
+        except (OSError, ConfigurationError, StorageError) as exc:
+            self._log_error(f"Could not restore the last profile: {exc}")
 
     def _apply_profile(self, profile: Profile) -> None:
         self.rules = profile.rules.copy()
@@ -1018,6 +1084,15 @@ class MainWindow(QMainWindow):
     def _log(self, message: str) -> None:
         timestamp = datetime.now().strftime("%H:%M:%S")
         self.log_panel.appendPlainText(f"[{timestamp}] {message}")
+        if self.storage is not None:
+            try:
+                self.storage.append_log(message)
+            except StorageError as exc:
+                if not self._persistent_log_error_reported:
+                    self._persistent_log_error_reported = True
+                    self.log_panel.appendPlainText(
+                        f"[{timestamp}] ERROR: Persistent activity log unavailable: {exc}"
+                    )
 
     def _log_error(self, message: str) -> None:
         self._has_error = True

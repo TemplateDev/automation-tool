@@ -98,6 +98,31 @@ def test_existing_versionless_profile_keeps_supported_action_shapes(tmp_path) ->
     assert loaded.rules[0].actions == legacy["rules"][0]["actions"]
 
 
+def test_existing_absolute_template_paths_load_without_migration_or_copy(tmp_path) -> None:
+    image_path = tmp_path / "user-owned.png"
+    image_path.write_bytes(b"user data")
+    profile_path = tmp_path / "absolute.json"
+    profile_path.write_text(
+        json.dumps(
+            {
+                "rules": [
+                    {
+                        "id": "absolute",
+                        "name": "Absolute",
+                        "template_path": str(image_path),
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    loaded = load_profile(profile_path)
+
+    assert loaded.rules[0].template_path == str(image_path)
+    assert image_path.read_bytes() == b"user data"
+
+
 def test_relative_click_actions_round_trip_without_changing_existing_action_shapes(tmp_path) -> None:
     profile_path = tmp_path / "relative.json"
     actions = [
