@@ -96,3 +96,26 @@ def test_existing_versionless_profile_keeps_supported_action_shapes(tmp_path) ->
 
     assert loaded.rules[0].template_path == str(image_path)
     assert loaded.rules[0].actions == legacy["rules"][0]["actions"]
+
+
+def test_relative_click_actions_round_trip_without_changing_existing_action_shapes(tmp_path) -> None:
+    profile_path = tmp_path / "relative.json"
+    actions = [
+        {"type": "click_center", "button": "right", "clicks": 2},
+        {
+            "type": "click_offset",
+            "offset_x": -7,
+            "offset_y": 12,
+            "button": "middle",
+            "clicks": 3,
+        },
+        {"type": "click", "x": 100, "y": 200},
+    ]
+    profile = Profile(
+        rules=[Rule(id="relative", name="Relative", template_path="image.png", actions=actions)]
+    )
+
+    save_profile(profile, profile_path)
+    loaded = load_profile(profile_path)
+
+    assert loaded.rules[0].actions == actions

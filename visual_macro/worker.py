@@ -52,7 +52,9 @@ class MacroWorker(QThread):
                     frame = capture.grab()
                     if self._stop_event.is_set():
                         break
-                    detections = self._recognize(frame, matcher)
+                    detections = self._recognize(
+                        frame, matcher, getattr(capture, "origin", (0, 0))
+                    )
                     if self._stop_event.is_set():
                         break
                     self._report_results(detections)
@@ -60,7 +62,8 @@ class MacroWorker(QThread):
                         if self._stop_event.is_set():
                             break
                         self.log_message.emit(f"Triggered rule: {rule.name}")
-                        executor.execute(rule.actions)
+                        detection = detections[rule.id]
+                        executor.execute(rule.actions, detection_rect=detection.bbox)
                     remaining = self.profile.interval - (time.monotonic() - cycle_started)
                     if remaining > 0:
                         self._stop_event.wait(remaining)
@@ -78,7 +81,7 @@ class MacroWorker(QThread):
         executor: MacroExecutor,
     ) -> None:
         frame = capture.grab()
-        detections = self._recognize(frame, matcher)
+        detections = self._recognize(frame, matcher, getattr(capture, "origin", (0, 0)))
         self._report_results(detections, include_absent=True)
         triggered = engine.evaluate(self.rules, detections, time.monotonic())
         if not triggered:
@@ -87,11 +90,16 @@ class MacroWorker(QThread):
             self.log_message.emit(f"Test matched rule: {rule.name}")
             if not rule.actions:
                 self.log_message.emit(f"No actions configured for {rule.name}.")
-            executor.execute(rule.actions)
+            executor.execute(rule.actions, detection_rect=detections[rule.id].bbox)
 
-    def _recognize(self, frame, matcher: TemplateMatcher):
+    def _recognize(
+        self,
+        frame,
+        matcher: TemplateMatcher,
+        screen_origin: tuple[int, int] = (0, 0),
+    ):
         return {
-            rule.id: matcher.match(frame, rule)
+            rule.id: matcher.match(frame, rule, screen_origin=screen_origin)
             for rule in self.rules
             if rule.enabled
         }
@@ -100,9 +108,10 @@ class MacroWorker(QThread):
         for rule in self.rules:
             detection = detections.get(rule.id)
             if detection is not None and detection.matched:
-                x, y = detection.location
+                x, y = detection.bbox[:2] if detection.bbox is not None else detection.location
                 self.log_message.emit(
-                    f"Recognized {rule.name} at ({x}, {y}), confidence {detection.confidence:.3f}."
+                    f"Recognized {rule.name} at ({x}, {y}), confidence "
+                    f"{detection.confidence:.3f}."
                 )
             elif include_absent and detection is not None:
                 self.log_message.emit(

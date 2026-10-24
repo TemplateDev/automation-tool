@@ -15,12 +15,14 @@ class Detection:
     confidence: float
     location: tuple[int, int] | None
     matched: bool
+    bbox: tuple[int, int, int, int] | None = None
 
 
 class ScreenCapture:
     def __enter__(self) -> ScreenCapture:
         self._capture = mss.mss()
         self._monitor = self._capture.monitors[0]
+        self.origin = (self._monitor["left"], self._monitor["top"])
         return self
 
     def __exit__(self, exc_type, exc_value, traceback) -> None:
@@ -49,7 +51,12 @@ class TemplateMatcher:
         self._templates[str(path.resolve())] = (modified, template.shape[1], template)
         return template
 
-    def match(self, frame: np.ndarray, rule: Rule) -> Detection:
+    def match(
+        self,
+        frame: np.ndarray,
+        rule: Rule,
+        screen_origin: tuple[int, int] = (0, 0),
+    ) -> Detection:
         template = self.ensure_template(rule)
         screen = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
         offset_x = 0
@@ -78,4 +85,19 @@ class TemplateMatcher:
         confidence = float(np.clip(confidence, 0.0, 1.0))
         matched = confidence >= rule.threshold
         absolute_location = (location[0] + offset_x, location[1] + offset_y) if matched else None
-        return Detection(confidence=confidence, location=absolute_location, matched=matched)
+        screen_bbox = (
+            (
+                location[0] + offset_x + screen_origin[0],
+                location[1] + offset_y + screen_origin[1],
+                template_width,
+                template_height,
+            )
+            if matched
+            else None
+        )
+        return Detection(
+            confidence=confidence,
+            location=absolute_location,
+            matched=matched,
+            bbox=screen_bbox,
+        )

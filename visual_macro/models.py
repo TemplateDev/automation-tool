@@ -56,6 +56,12 @@ def validate_action(action: Any) -> None:
         clicks = action.get("clicks", 1)
         if not _is_integer(clicks) or not 1 <= clicks <= 10:
             raise ConfigurationError("Click count must be an integer from 1 to 10.")
+    elif kind == "click_center":
+        _validate_click_options(action)
+    elif kind == "click_offset":
+        _integer(action.get("offset_x"), "horizontal click offset")
+        _integer(action.get("offset_y"), "vertical click offset")
+        _validate_click_options(action)
     elif kind == "press":
         key = action.get("key")
         if not isinstance(key, str) or not key.strip():
@@ -66,6 +72,15 @@ def validate_action(action: Any) -> None:
             raise ConfigurationError("Delay seconds must be between 0 and 300.")
     else:
         raise ConfigurationError(f"Unsupported macro action type: {kind!r}.")
+
+
+def _validate_click_options(action: dict[str, Any]) -> None:
+    button = action.get("button", "left")
+    if not isinstance(button, str) or button not in {"left", "right", "middle"}:
+        raise ConfigurationError("Click button must be left, right, or middle.")
+    clicks = action.get("clicks", 1)
+    if not _is_integer(clicks) or not 1 <= clicks <= 10:
+        raise ConfigurationError("Click count must be an integer from 1 to 10.")
 
 
 def validate_rule(rule: Rule) -> None:

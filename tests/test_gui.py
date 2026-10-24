@@ -20,6 +20,39 @@ def test_action_dialog_edits_existing_profile_action_shape(qapp) -> None:
     }
 
 
+def test_fixed_action_editor_preserves_negative_monitor_coordinates(qapp) -> None:
+    dialog = ActionDialog(
+        action={"type": "click", "x": -320, "y": -40, "button": "left", "clicks": 1}
+    )
+
+    assert dialog.action()["x"] == -320
+    assert dialog.action()["y"] == -40
+
+
+def test_action_dialog_creates_center_and_offset_actions(qapp) -> None:
+    center = ActionDialog()
+    center.type_input.setCurrentIndex(center.type_input.findData("click_center"))
+    center.center_button_input.setCurrentText("middle")
+    center.center_clicks_input.setValue(2)
+    assert center.action() == {
+        "type": "click_center",
+        "button": "middle",
+        "clicks": 2,
+    }
+
+    offset = ActionDialog()
+    offset.type_input.setCurrentIndex(offset.type_input.findData("click_offset"))
+    offset.offset_x_input.setValue(-12)
+    offset.offset_y_input.setValue(5)
+    assert offset.action() == {
+        "type": "click_offset",
+        "offset_x": -12,
+        "offset_y": 5,
+        "button": "left",
+        "clicks": 1,
+    }
+
+
 def test_action_builder_duplicates_reorders_and_removes_actions(qapp) -> None:
     builder = ActionBuilder(
         [

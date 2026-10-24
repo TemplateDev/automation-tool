@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ctypes
 import sys
 import uuid
 from copy import deepcopy
@@ -7,8 +8,9 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+import cv2
 from PySide6.QtCore import Qt
-from PySide6.QtGui import QAction, QCloseEvent, QPixmap
+from PySide6.QtGui import QAction, QCloseEvent, QImage, QPixmap
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -43,6 +45,12 @@ from visual_macro.models import (
     save_profile,
     validate_action,
 )
+from visual_macro.desktop import (
+    ScreenCoordinateMapper,
+    capture_screen_region,
+    frame_relative_region,
+)
+from visual_macro.region_picker import ScreenRegionOverlay
 from visual_macro.worker import MacroWorker
 
 
@@ -55,15 +63,17 @@ class ActionDialog(QDialog):
 
         self.type_input = QComboBox()
         self.type_input.addItem("Click at screen coordinates", "click")
+        self.type_input.addItem("Click detected image center", "click_center")
+        self.type_input.addItem("Click offset from detected image center", "click_offset")
         self.type_input.addItem("Press a key", "press")
         self.type_input.addItem("Wait", "delay")
 
         self.click_fields = QWidget()
         click_form = QFormLayout(self.click_fields)
         self.x_input = QSpinBox()
-        self.x_input.setRange(0, 100000)
+        self.x_input.setRange(-100000, 100000)
         self.y_input = QSpinBox()
-        self.y_input.setRange(0, 100000)
+        self.y_input.setRange(-100000, 100000)
         self.button_input = QComboBox()
         self.button_input.addItems(["left", "right", "middle"])
         self.clicks_input = QSpinBox()
@@ -72,6 +82,30 @@ class ActionDialog(QDialog):
         click_form.addRow("Screen Y", self.y_input)
         click_form.addRow("Mouse button", self.button_input)
         click_form.addRow("Click count", self.clicks_input)
+
+        self.center_fields = QWidget()
+        center_form = QFormLayout(self.center_fields)
+        self.center_button_input = QComboBox()
+        self.center_button_input.addItems(["left", "right", "middle"])
+        self.center_clicks_input = QSpinBox()
+        self.center_clicks_input.setRange(1, 10)
+        center_form.addRow("Mouse button", self.center_button_input)
+        center_form.addRow("Click count", self.center_clicks_input)
+
+        self.offset_fields = QWidget()
+        offset_form = QFormLayout(self.offset_fields)
+        self.offset_x_input = QSpinBox()
+        self.offset_x_input.setRange(-100000, 100000)
+        self.offset_y_input = QSpinBox()
+        self.offset_y_input.setRange(-100000, 100000)
+        self.offset_button_input = QComboBox()
+        self.offset_button_input.addItems(["left", "right", "middle"])
+        self.offset_clicks_input = QSpinBox()
+        self.offset_clicks_input.setRange(1, 10)
+        offset_form.addRow("X offset from center", self.offset_x_input)
+        offset_form.addRow("Y offset from center", self.offset_y_input)
+        offset_form.addRow("Mouse button", self.offset_button_input)
+        offset_form.addRow("Click count", self.offset_clicks_input)
 
         self.press_fields = QWidget()
         press_form = QFormLayout(self.press_fields)
@@ -89,6 +123,8 @@ class ActionDialog(QDialog):
 
         self.fields_stack = QStackedWidget()
         self.fields_stack.addWidget(self.click_fields)
+        self.fields_stack.addWidget(self.center_fields)
+        self.fields_stack.addWidget(self.offset_fields)
         self.fields_stack.addWidget(self.press_fields)
         self.fields_stack.addWidget(self.delay_fields)
         self.type_input.currentIndexChanged.connect(self._update_fields)
@@ -118,6 +154,14 @@ class ActionDialog(QDialog):
                 self.y_input.setValue(action.get("y", 0))
                 self.button_input.setCurrentText(action.get("button", "left"))
                 self.clicks_input.setValue(action.get("clicks", 1))
+            elif action.get("type") == "click_center":
+                self.center_button_input.setCurrentText(action.get("button", "left"))
+                self.center_clicks_input.setValue(action.get("clicks", 1))
+            elif action.get("type") == "click_offset":
+                self.offset_x_input.setValue(action.get("offset_x", 0))
+                self.offset_y_input.setValue(action.get("offset_y", 0))
+                self.offset_button_input.setCurrentText(action.get("button", "left"))
+                self.offset_clicks_input.setValue(action.get("clicks", 1))
             elif action.get("type") == "press":
                 self.key_input.setText(action.get("key", ""))
             elif action.get("type") == "delay":
@@ -125,7 +169,14 @@ class ActionDialog(QDialog):
         self._update_fields()
 
     def _update_fields(self) -> None:
-        self.fields_stack.setCurrentIndex(self.type_input.currentIndex())
+        field_index = {
+            "click": 0,
+            "click_center": 1,
+            "click_offset": 2,
+            "press": 3,
+            "delay": 4,
+        }[self.type_input.currentData()]
+        self.fields_stack.setCurrentIndex(field_index)
 
     def action(self) -> dict[str, Any]:
         kind = self.type_input.currentData()
@@ -136,6 +187,20 @@ class ActionDialog(QDialog):
                 "y": self.y_input.value(),
                 "button": self.button_input.currentText(),
                 "clicks": self.clicks_input.value(),
+            }
+        elif kind == "click_center":
+            action = {
+                "type": kind,
+                "button": self.center_button_input.currentText(),
+                "clicks": self.center_clicks_input.value(),
+            }
+        elif kind == "click_offset":
+            action = {
+                "type": kind,
+                "offset_x": self.offset_x_input.value(),
+                "offset_y": self.offset_y_input.value(),
+                "button": self.offset_button_input.currentText(),
+                "clicks": self.offset_clicks_input.value(),
             }
         elif kind == "press":
             action = {"type": "press", "key": self.key_input.text().strip()}
@@ -264,12 +329,17 @@ class RuleDialog(QDialog):
         self.filename_label.setWordWrap(True)
         self.choose_image_button = QPushButton("Choose Image…")
         self.choose_image_button.clicked.connect(self._browse_template)
+        self.capture_template_button = QPushButton("Capture Template…")
+        self.capture_template_button.clicked.connect(self._capture_template)
 
         image_row = QHBoxLayout()
         image_row.addWidget(self.thumbnail)
         image_info = QVBoxLayout()
         image_info.addWidget(self.filename_label)
-        image_info.addWidget(self.choose_image_button)
+        image_buttons = QHBoxLayout()
+        image_buttons.addWidget(self.choose_image_button)
+        image_buttons.addWidget(self.capture_template_button)
+        image_info.addLayout(image_buttons)
         image_row.addLayout(image_info, 1)
 
         self.threshold_input = QDoubleSpinBox()
@@ -307,6 +377,12 @@ class RuleDialog(QDialog):
         self.advanced_region.setVisible(False)
         self.advanced_toggle.toggled.connect(self._toggle_advanced)
         self.region_enabled.toggled.connect(self._update_region_enabled)
+        self.select_region_button = QPushButton("Select Region…")
+        self.select_region_button.clicked.connect(self._select_region)
+        self.region_summary = QLabel(
+            "Full screen" if not rule or not rule.region else self._format_region(rule.region)
+        )
+        self.region_summary.setStyleSheet("color: #aab1bc;")
 
         recognition = QGroupBox("Recognition")
         region_form.insertRow(0, "", self.region_enabled)
@@ -315,6 +391,8 @@ class RuleDialog(QDialog):
         recognition_form.addRow("Image template", image_row)
         recognition_form.addRow("Confidence threshold", self.threshold_input)
         recognition_form.addRow("", threshold_help)
+        recognition_form.addRow("Search area", self.select_region_button)
+        recognition_form.addRow("", self.region_summary)
         recognition_form.addRow("", self.advanced_toggle)
         recognition_form.addRow("", self.advanced_region)
 
@@ -399,6 +477,100 @@ class RuleDialog(QDialog):
             self._update_image()
             if not self.name_input.text().strip() or self.name_input.text() == "New rule":
                 self.name_input.setText(Path(path).stem)
+
+    @staticmethod
+    def _format_region(region: tuple[int, int, int, int]) -> str:
+        x, y, width, height = region
+        return f"X {x}, Y {y}  ·  {width} × {height} px"
+
+    def _select_region(self) -> None:
+        try:
+            mapper = ScreenCoordinateMapper.from_desktop()
+            overlay = ScreenRegionOverlay(mapper, self)
+            if overlay.exec() != QDialog.DialogCode.Accepted or overlay.screen_rect is None:
+                return
+            bounds = mapper.virtual_bounds
+            region = frame_relative_region(
+                overlay.screen_rect,
+                (bounds["left"], bounds["top"]),
+                (bounds["height"], bounds["width"]),
+            )
+        except (OSError, RuntimeError, ValueError) as exc:
+            self._error_label.setText(f"Could not select a screen region: {exc}")
+            return
+        self.region_enabled.setChecked(True)
+        for widget, value in zip(
+            (self.region_x, self.region_y, self.region_width, self.region_height), region
+        ):
+            widget.setValue(value)
+        self.region_summary.setText(self._format_region(region))
+
+    def _capture_template(self) -> None:
+        try:
+            mapper = ScreenCoordinateMapper.from_desktop()
+            overlay = ScreenRegionOverlay(mapper, self)
+            if overlay.exec() != QDialog.DialogCode.Accepted or overlay.screen_rect is None:
+                return
+            image = capture_screen_region(overlay.screen_rect)
+        except (OSError, RuntimeError, ValueError) as exc:
+            self._error_label.setText(f"Could not capture template: {exc}")
+            return
+
+        height, width, _channels = image.shape
+        preview = QImage(
+            image.data,
+            width,
+            height,
+            image.strides[0],
+            QImage.Format.Format_BGR888,
+        ).copy()
+        preview_dialog = QDialog(self)
+        preview_dialog.setWindowTitle("Preview Template Capture")
+        preview_dialog.resize(640, 520)
+        preview_label = QLabel()
+        preview_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        preview_label.setPixmap(
+            QPixmap.fromImage(preview).scaled(
+                600,
+                420,
+                Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.SmoothTransformation,
+            )
+        )
+        preview_buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel
+        )
+        preview_buttons.accepted.connect(preview_dialog.accept)
+        preview_buttons.rejected.connect(preview_dialog.reject)
+        preview_layout = QVBoxLayout(preview_dialog)
+        preview_layout.addWidget(QLabel(f"Captured template: {width} × {height} pixels"))
+        preview_layout.addWidget(preview_label, 1)
+        preview_layout.addWidget(preview_buttons)
+        if preview_dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+
+        path, _ = QFileDialog.getSaveFileName(
+            self,
+            "Save captured template",
+            self.template_path,
+            "PNG image (*.png);;JPEG image (*.jpg *.jpeg);;Bitmap image (*.bmp)",
+        )
+        if not path:
+            return
+        if not Path(path).suffix:
+            path += ".png"
+        try:
+            saved = cv2.imwrite(path, image)
+        except cv2.error as exc:
+            self._error_label.setText(f"Could not save captured template: {exc}")
+            return
+        if not saved:
+            self._error_label.setText(f"Could not save captured template: {path}")
+            return
+        self.template_path = str(Path(path).resolve())
+        self._update_image()
+        if not self.name_input.text().strip() or self.name_input.text() == "New rule":
+            self.name_input.setText(Path(path).stem)
 
     def _build_rule(self) -> Rule:
         region = None
@@ -868,6 +1040,18 @@ def _action_summary(action: dict[str, Any]) -> str:
         return f"{button.title()} click ({action.get('x')}, {action.get('y')})" + (
             f" ×{count}" if count > 1 else ""
         )
+    if kind == "click_center":
+        count = action.get("clicks", 1)
+        return f"{action.get('button', 'left').title()} click image center" + (
+            f" ×{count}" if count > 1 else ""
+        )
+    if kind == "click_offset":
+        count = action.get("clicks", 1)
+        return (
+            f"{action.get('button', 'left').title()} click center "
+            f"({action.get('offset_x', 0):+}, {action.get('offset_y', 0):+})"
+            + (f" ×{count}" if count > 1 else "")
+        )
     if kind == "press":
         return f"Press {action.get('key', '?')}"
     if kind == "delay":
@@ -887,7 +1071,33 @@ def _actions_summary(actions: list[dict[str, Any]]) -> str:
 def main() -> int:
     from PySide6.QtWidgets import QApplication
 
+    _enable_per_monitor_dpi_awareness()
     app = QApplication(sys.argv)
     window = MainWindow()
     window.show()
     return app.exec()
+
+
+def _enable_per_monitor_dpi_awareness() -> None:
+    if sys.platform != "win32":
+        return
+    try:
+        user32 = ctypes.windll.user32
+        set_context = getattr(user32, "SetProcessDpiAwarenessContext", None)
+        if set_context is not None and set_context(ctypes.c_void_p(-4)):
+            return
+        error = ctypes.get_last_error()
+        if error == 5:
+            return
+        result = int(ctypes.windll.shcore.SetProcessDpiAwareness(2)) & 0xFFFFFFFF
+        if result in (0, 0x80070005):
+            return
+        raise OSError(f"Windows DPI-awareness setup returned HRESULT 0x{result:08X}")
+    except (AttributeError, OSError) as exc:
+        import warnings
+
+        warnings.warn(
+            f"Could not enable per-monitor DPI awareness; desktop coordinates may not align: {exc}",
+            RuntimeWarning,
+            stacklevel=2,
+        )

@@ -26,7 +26,33 @@ def test_matcher_reports_full_screen_location_and_confidence(tmp_path) -> None:
 
     assert result.matched
     assert result.location == (17, 12)
+    assert result.bbox == (17, 12, 9, 8)
     assert result.confidence >= 0.99
+
+
+def test_match_bbox_includes_search_region_and_virtual_desktop_origin(tmp_path) -> None:
+    rng = np.random.default_rng(12)
+    template = rng.integers(0, 256, size=(6, 7), dtype=np.uint8)
+    screen = rng.integers(0, 256, size=(45, 55), dtype=np.uint8)
+    screen[18:24, 21:28] = template
+    template_path = tmp_path / "template.png"
+    cv2.imwrite(str(template_path), template)
+    rule = Rule(
+        id="target",
+        name="Target",
+        template_path=str(template_path),
+        threshold=0.99,
+        region=(12, 10, 30, 25),
+    )
+
+    result = TemplateMatcher().match(
+        cv2.cvtColor(screen, cv2.COLOR_GRAY2BGR),
+        rule,
+        screen_origin=(-1920, -100),
+    )
+
+    assert result.location == (21, 18)
+    assert result.bbox == (-1899, -82, 7, 6)
 
 
 def test_matcher_reports_absence_below_threshold(tmp_path) -> None:
