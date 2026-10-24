@@ -1,0 +1,41 @@
+import cv2
+import numpy as np
+
+from visual_macro.models import Rule
+from visual_macro.recognition import TemplateMatcher
+
+
+def test_matcher_reports_full_screen_location_and_confidence(tmp_path) -> None:
+    rng = np.random.default_rng(4)
+    template = rng.integers(0, 256, size=(8, 9), dtype=np.uint8)
+    screen = rng.integers(0, 256, size=(40, 50), dtype=np.uint8)
+    screen[12:20, 17:26] = template
+    template_path = tmp_path / "template.png"
+    cv2.imwrite(str(template_path), template)
+
+    rule = Rule(
+        id="target",
+        name="Target",
+        template_path=str(template_path),
+        threshold=0.99,
+        region=(10, 8, 30, 25),
+    )
+    frame = cv2.cvtColor(screen, cv2.COLOR_GRAY2BGR)
+
+    result = TemplateMatcher().match(frame, rule)
+
+    assert result.matched
+    assert result.location == (17, 12)
+    assert result.confidence >= 0.99
+
+
+def test_matcher_reports_absence_below_threshold(tmp_path) -> None:
+    template_path = tmp_path / "template.png"
+    cv2.imwrite(str(template_path), np.full((5, 5), 255, dtype=np.uint8))
+    rule = Rule(id="target", name="Target", template_path=str(template_path), threshold=0.9)
+    frame = np.zeros((20, 20, 3), dtype=np.uint8)
+
+    result = TemplateMatcher().match(frame, rule)
+
+    assert not result.matched
+    assert result.location is None

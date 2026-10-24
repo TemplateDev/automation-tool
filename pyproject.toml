@@ -1,7 +1,22 @@
 [project]
 name = "automation-tool"
 version = "0.1.0"
-description = "Add your description here"
+description = "Windows visual macro automation using image matching"
 readme = "README.md"
 requires-python = ">=3.11"
-dependencies = []
+dependencies = [
+    "mss>=9.0",
+    "numpy>=1.26",
+    "opencv-python>=4.9",
+    "PyAutoGUI>=0.9.54",
+    "PySide6>=6.7",
+]
+
+[project.optional-dependencies]
+test = ["pytest>=8.0"]
+
+[project.scripts]
+visual-macro = "visual_macro.gui:main"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

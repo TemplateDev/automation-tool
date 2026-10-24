@@ -1,6 +1,5 @@
-def main():
-    print("Hello from automation-tool!")
+from visual_macro.gui import main
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

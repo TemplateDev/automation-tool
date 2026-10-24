@@ -1,0 +1,1 @@
+"""Visual macro automation application."""
