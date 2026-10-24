@@ -33,7 +33,11 @@ class MacroWorker(QThread):
     def run(self) -> None:
         matcher = TemplateMatcher()
         engine = RuleEngine()
-        executor = MacroExecutor(self.profile.simulation, self.log_message.emit, self._stop_event)
+        executor = MacroExecutor(
+            simulation=True if self.once else self.profile.simulation,
+            log=self.log_message.emit,
+            stop_event=self._stop_event,
+        )
         try:
             for rule in self.rules:
                 if rule.enabled:
@@ -46,9 +50,15 @@ class MacroWorker(QThread):
                 while not self._stop_event.is_set():
                     cycle_started = time.monotonic()
                     frame = capture.grab()
+                    if self._stop_event.is_set():
+                        break
                     detections = self._recognize(frame, matcher)
+                    if self._stop_event.is_set():
+                        break
                     self._report_results(detections)
                     for rule in engine.evaluate(self.rules, detections, cycle_started):
+                        if self._stop_event.is_set():
+                            break
                         self.log_message.emit(f"Triggered rule: {rule.name}")
                         executor.execute(rule.actions)
                     remaining = self.profile.interval - (time.monotonic() - cycle_started)
@@ -69,12 +79,14 @@ class MacroWorker(QThread):
     ) -> None:
         frame = capture.grab()
         detections = self._recognize(frame, matcher)
-        self._report_results(detections)
+        self._report_results(detections, include_absent=True)
         triggered = engine.evaluate(self.rules, detections, time.monotonic())
         if not triggered:
             self.log_message.emit("Test complete: template was not detected; no actions run.")
         for rule in triggered:
             self.log_message.emit(f"Test matched rule: {rule.name}")
+            if not rule.actions:
+                self.log_message.emit(f"No actions configured for {rule.name}.")
             executor.execute(rule.actions)
 
     def _recognize(self, frame, matcher: TemplateMatcher):
@@ -84,11 +96,16 @@ class MacroWorker(QThread):
             if rule.enabled
         }
 
-    def _report_results(self, detections) -> None:
+    def _report_results(self, detections, include_absent: bool = False) -> None:
         for rule in self.rules:
             detection = detections.get(rule.id)
             if detection is not None and detection.matched:
                 x, y = detection.location
                 self.log_message.emit(
                     f"Recognized {rule.name} at ({x}, {y}), confidence {detection.confidence:.3f}."
+                )
+            elif include_absent and detection is not None:
+                self.log_message.emit(
+                    f"No match for {rule.name}; best confidence {detection.confidence:.3f} "
+                    f"(threshold {rule.threshold:.3f})."
                 )

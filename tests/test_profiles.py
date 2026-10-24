@@ -63,3 +63,36 @@ def test_load_profile_rejects_unsupported_version(tmp_path) -> None:
 
     with pytest.raises(ConfigurationError, match="Unsupported profile version"):
         load_profile(path)
+
+
+def test_existing_versionless_profile_keeps_supported_action_shapes(tmp_path) -> None:
+    image_path = tmp_path / "button.png"
+    image_path.touch()
+    profile_path = tmp_path / "legacy.json"
+    legacy = {
+        "interval": 1.0,
+        "simulation": True,
+        "rules": [
+            {
+                "id": "legacy-button",
+                "name": "Legacy button",
+                "template_path": "button.png",
+                "threshold": 0.8,
+                "region": None,
+                "cooldown": 1.0,
+                "repeat": False,
+                "enabled": True,
+                "actions": [
+                    {"type": "click", "x": 100, "y": 200, "button": "left", "clicks": 1},
+                    {"type": "press", "key": "enter"},
+                    {"type": "delay", "seconds": 0.5},
+                ],
+            }
+        ],
+    }
+    profile_path.write_text(json.dumps(legacy), encoding="utf-8")
+
+    loaded = load_profile(profile_path)
+
+    assert loaded.rules[0].template_path == str(image_path)
+    assert loaded.rules[0].actions == legacy["rules"][0]["actions"]

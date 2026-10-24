@@ -20,18 +20,19 @@ Or, after installing, use `visual-macro`.
 
 ## Usage
 
-1. Click **Add Template…** and select a small image crop to recognize.
-2. Set the confidence threshold (0–1), optional screen region (`x,y,width,height`), cooldown, and whether the rule may repeat while its image stays visible.
-3. Enter macro actions as a JSON array. Supported actions:
-   - `{"type":"click","x":100,"y":200,"button":"left","clicks":1}`
-   - `{"type":"press","key":"enter"}`
-   - `{"type":"delay","seconds":0.5}`
-4. Select a rule and click **Test Rule** to capture the screen once and test its macro.
-5. Keep **Simulation mode** checked (the default) to log planned actions without sending input. Uncheck it only when ready to let PyAutoGUI control the desktop.
-6. Click **Start** to monitor at the configured capture interval (default: 1 second), or **Stop** to end monitoring.
-7. Use **Save Profile** and **Load Profile…** to store or restore rules and settings in JSON. Template paths inside the profile are relative when possible.
+1. Click **Add Rule** and choose a small image crop to recognize.
+2. In **Recognition**, set the confidence threshold as a percentage. Higher thresholds require a closer visual match. Optionally expand the screen-region controls and enter the left/top coordinates and width/height.
+3. Add steps in **Actions**. Use the visual builder to add, edit, duplicate, remove, and reorder actions. The existing supported actions are:
+   - Click at absolute screen coordinates, with button and click count.
+   - Press a key.
+   - Wait for a duration.
+4. In **Trigger Behavior**, set the cooldown and whether the rule can repeat while the image stays visible.
+5. Select a rule and click **Test Rule** to capture once, report match confidence/location (or the best confidence if absent), and preview its planned actions. A test never sends input, even when live mode is selected.
+6. Keep **Simulation mode** enabled (the default) to log planned actions without sending input. The mode indicator turns red and warns that mouse/keyboard input will be sent when live mode is selected.
+7. Click **Start** to monitor at the configured capture interval (default: 1 second), or **Stop** to stop. The status indicator reports Stopped, Running, or Error. Stopping takes effect between capture/matching steps or macro actions.
+8. Use the profile toolbar or **Profile** menu to save/load settings and JSON profiles. Template paths inside saved profiles are relative when possible.
 
-The activity log includes match locations and confidence scores, planned or executed actions, and errors. A rule triggers on an absent-to-present transition; it must disappear before another trigger unless repeat is enabled. Repeat rules may trigger again after their cooldown while the match remains present.
+The activity log can be collapsed without losing its contents. A rule triggers on an absent-to-present transition; it must disappear before another trigger unless repeat is enabled. Repeat rules may trigger again after their cooldown while the match remains present.
 
 ## Profile format
 
@@ -63,6 +64,20 @@ Profiles use version 1 JSON. A minimal example:
 ```
 
 The application validates profile values, action types, unique rule IDs, region geometry, and template availability before monitoring. An unreadable or missing image and invalid actions are reported in the activity log.
+
+### Existing configuration and Python interfaces
+
+Saved profile version 1 remains unchanged. The root contains `version`, `interval`, `simulation`, and `rules`. Each rule stores `id`, `name`, `template_path`, `threshold` (0–1), `region` (null or `[x, y, width, height]`), `cooldown`, `repeat`, `enabled`, and `actions`. Existing action objects remain:
+
+```json
+{"type": "click", "x": 100, "y": 200, "button": "left", "clicks": 1}
+{"type": "press", "key": "enter"}
+{"type": "delay", "seconds": 0.5}
+```
+
+Python integration points are `visual_macro.models.Rule` and `Profile`, `load_profile(path)` / `save_profile(profile, path)`, `visual_macro.recognition.TemplateMatcher.match(frame, rule)`, `visual_macro.engine.RuleEngine.evaluate(rules, detections, now)`, `visual_macro.macros.MacroExecutor.execute(actions)`, and `visual_macro.worker.MacroWorker` with `log_message` and `error_message` Qt signals. The UI uses the same models, JSON format, worker, matcher, engine, and executor. `RuleDialog.rule()` continues to return a validated `Rule`; the visual `ActionBuilder` returns the same existing action dictionaries rather than a UI-specific serialization.
+
+The action builder intentionally does not offer image-center/offset clicks or key release: those action types are not supported by the current macro executor or profile contract.
 
 ## Tests
 
