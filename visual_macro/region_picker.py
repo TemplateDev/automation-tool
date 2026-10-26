@@ -157,3 +157,139 @@ class ScreenRegionOverlay(QDialog):
             self.confirm_button.setEnabled(False)
             return
         self.accept()
+
+
+class ScreenPositionOverlay(QDialog):
+    """Full-desktop click picker returning coordinates in the input executor's pixel space."""
+
+    def __init__(
+        self,
+        mapper: ScreenCoordinateMapper | None = None,
+        parent=None,
+    ) -> None:
+        super().__init__(parent)
+        self.mapper = mapper or ScreenCoordinateMapper.from_desktop()
+        self.setWindowTitle("Pick Screen Position")
+        self.setWindowFlags(
+            Qt.WindowType.Dialog
+            | Qt.WindowType.FramelessWindowHint
+            | Qt.WindowType.WindowStaysOnTopHint
+            | Qt.WindowType.Tool
+        )
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        self.setGeometry(self.mapper.logical_bounds)
+        self.setMouseTracking(True)
+        self.setCursor(Qt.CursorShape.CrossCursor)
+        self.selected_position: tuple[int, int] | None = None
+        self._hover_position: tuple[int, int] | None = None
+
+        self.instruction = QLabel("Click the desired desktop position  ·  Esc cancels")
+        self.instruction.setStyleSheet(
+            "background: #20252d; color: white; padding: 9px 14px; border-radius: 5px;"
+        )
+        self.coordinates = QLabel("No position selected")
+        self.coordinates.setStyleSheet(
+            "background: #20252d; color: white; padding: 7px 11px; border-radius: 4px;"
+        )
+        self.confirm_button = QPushButton("Use Position")
+        self.confirm_button.setEnabled(False)
+        self.retry_button = QPushButton("Retry")
+        self.retry_button.setEnabled(False)
+        self.cancel_button = QPushButton("Cancel")
+        self.confirm_button.clicked.connect(self._confirm)
+        self.retry_button.clicked.connect(self._retry)
+        self.cancel_button.clicked.connect(self.reject)
+
+        controls = QHBoxLayout()
+        controls.addWidget(self.instruction)
+        controls.addWidget(self.coordinates)
+        controls.addStretch(1)
+        controls.addWidget(self.retry_button)
+        controls.addWidget(self.confirm_button)
+        controls.addWidget(self.cancel_button)
+        controls_widget = QWidget(self)
+        controls_widget.setStyleSheet("background: transparent;")
+        controls_widget.setLayout(controls)
+        controls_widget.setGeometry(16, 16, min(self.width() - 32, 1050), 52)
+
+    def mousePressEvent(self, event: QMouseEvent) -> None:
+        if event.button() == Qt.MouseButton.LeftButton:
+            global_position = event.globalPosition().toPoint()
+            if not self.mapper.contains_logical_point(
+                global_position.x(), global_position.y()
+            ):
+                self.coordinates.setText("Select a point on a connected display")
+                self.selected_position = None
+                self.confirm_button.setEnabled(False)
+                self.retry_button.setEnabled(False)
+                event.accept()
+                return
+            try:
+                self.selected_position = self.mapper.map_point(
+                    global_position.x(), global_position.y()
+                )
+            except (RuntimeError, ValueError) as exc:
+                self.coordinates.setText(f"Could not map position: {exc}")
+                self.selected_position = None
+                self.confirm_button.setEnabled(False)
+                self.retry_button.setEnabled(False)
+                return
+            self.coordinates.setText(
+                f"X {self.selected_position[0]}, Y {self.selected_position[1]}"
+            )
+            self.confirm_button.setEnabled(True)
+            self.retry_button.setEnabled(True)
+            self.update()
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event: QMouseEvent) -> None:
+        global_position = event.globalPosition().toPoint()
+        if self.mapper.contains_logical_point(
+            global_position.x(), global_position.y()
+        ):
+            self._hover_position = self.mapper.map_point(
+                global_position.x(), global_position.y()
+            )
+        else:
+            self._hover_position = None
+        self.update()
+        super().mouseMoveEvent(event)
+
+    def keyPressEvent(self, event: QKeyEvent) -> None:
+        if event.key() == Qt.Key.Key_Escape:
+            self.reject()
+            return
+        super().keyPressEvent(event)
+
+    def paintEvent(self, event) -> None:
+        painter = QPainter(self)
+        painter.fillRect(self.rect(), QColor(5, 8, 12, 145))
+        position = self.selected_position or self._hover_position
+        if position is not None:
+            logical_position = self._logical_position_for_physical(position)
+            if logical_position is not None:
+                point = self.mapFromGlobal(logical_position)
+                painter.setPen(QPen(QColor("#64c5ff"), 2))
+                painter.drawLine(point.x() - 12, point.y(), point.x() + 12, point.y())
+                painter.drawLine(point.x(), point.y() - 12, point.x(), point.y() + 12)
+        super().paintEvent(event)
+
+    def _logical_position_for_physical(self, position: tuple[int, int]) -> QPoint | None:
+        point = self.mapper.logical_point_for_screen(*position)
+        return QPoint(*point) if point is not None else None
+
+    def _retry(self) -> None:
+        self.selected_position = None
+        self.coordinates.setText("Click the desired desktop position")
+        self.confirm_button.setEnabled(False)
+        self.retry_button.setEnabled(False)
+        self.update()
+
+    def _confirm(self) -> None:
+        if self.selected_position is None:
+            self.coordinates.setText("Select a position before confirming")
+            self.confirm_button.setEnabled(False)
+            return
+        self.accept()

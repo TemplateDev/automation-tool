@@ -9,10 +9,11 @@ from pathlib import Path
 from typing import Any
 
 import cv2
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QAction, QCloseEvent, QImage, QPixmap
 from PySide6.QtWidgets import (
     QCheckBox,
+    QButtonGroup,
     QComboBox,
     QDialog,
     QDialogButtonBox,
@@ -21,14 +22,17 @@ from PySide6.QtWidgets import (
     QFormLayout,
     QGroupBox,
     QHBoxLayout,
+    QInputDialog,
     QLabel,
     QLineEdit,
     QMainWindow,
     QMessageBox,
     QPushButton,
     QPlainTextEdit,
+    QRadioButton,
     QSpinBox,
     QStackedWidget,
+    QStyle,
     QTableWidget,
     QTableWidgetItem,
     QToolBar,
@@ -40,6 +44,7 @@ from PySide6.QtWidgets import (
 from visual_macro.models import (
     ConfigurationError,
     Profile,
+    Macro,
     Rule,
     load_profile,
     save_profile,
@@ -50,7 +55,7 @@ from visual_macro.desktop import (
     capture_screen_region,
     frame_relative_region,
 )
-from visual_macro.region_picker import ScreenRegionOverlay
+from visual_macro.region_picker import ScreenPositionOverlay, ScreenRegionOverlay
 from visual_macro.worker import MacroWorker
 from visual_macro.storage import ApplicationStorage, StorageError
 
@@ -58,7 +63,12 @@ from visual_macro.storage import ApplicationStorage, StorageError
 class ActionDialog(QDialog):
     """Typed editor for the click, press, and delay actions supported by the executor."""
 
-    def __init__(self, parent=None, action: dict[str, Any] | None = None) -> None:
+    def __init__(
+        self,
+        parent=None,
+        action: dict[str, Any] | None = None,
+        action_depth: int = 0,
+    ) -> None:
         super().__init__(parent)
         self.setWindowTitle("Edit Action" if action else "Add Action")
 
@@ -66,8 +76,18 @@ class ActionDialog(QDialog):
         self.type_input.addItem("Click at screen coordinates", "click")
         self.type_input.addItem("Click detected image center", "click_center")
         self.type_input.addItem("Click offset from detected image center", "click_offset")
+        self.type_input.addItem("Move mouse to screen position", "move")
+        self.type_input.addItem("Scroll mouse wheel", "scroll")
         self.type_input.addItem("Press a key", "press")
+        self.type_input.addItem("Type text", "type_text")
+        self.type_input.addItem("Press a key combination", "hotkey")
+        self.type_input.addItem("Hold a key", "key_down")
+        self.type_input.addItem("Release a key", "key_up")
         self.type_input.addItem("Wait", "delay")
+        self.type_input.addItem("Wait for an image", "wait_image")
+        self.type_input.addItem("Branch on an image", "if_image")
+        if action_depth < 5:
+            self.type_input.addItem("Repeat an action sequence", "repeat")
 
         self.click_fields = QWidget()
         click_form = QFormLayout(self.click_fields)
@@ -79,10 +99,24 @@ class ActionDialog(QDialog):
         self.button_input.addItems(["left", "right", "middle"])
         self.clicks_input = QSpinBox()
         self.clicks_input.setRange(1, 10)
+        self.pick_position_button = QPushButton("Pick Position…")
+        self.pick_position_button.setToolTip(
+            "Select a point on the desktop and use its input-executor coordinates."
+        )
+        self.pick_position_button.clicked.connect(
+            lambda: self._pick_position(self.x_input, self.y_input)
+        )
+        self.position_summary = QLabel()
+        self.x_input.valueChanged.connect(self._update_position_summary)
+        self.y_input.valueChanged.connect(self._update_position_summary)
+        position_row = QHBoxLayout()
+        position_row.addWidget(self.pick_position_button)
+        position_row.addWidget(self.position_summary, 1)
+        click_form.addRow("Position", position_row)
         click_form.addRow("Screen X", self.x_input)
         click_form.addRow("Screen Y", self.y_input)
         click_form.addRow("Mouse button", self.button_input)
-        click_form.addRow("Click count", self.clicks_input)
+        click_form.addRow("Click count (2 = double-click)", self.clicks_input)
 
         self.center_fields = QWidget()
         center_form = QFormLayout(self.center_fields)
@@ -91,7 +125,7 @@ class ActionDialog(QDialog):
         self.center_clicks_input = QSpinBox()
         self.center_clicks_input.setRange(1, 10)
         center_form.addRow("Mouse button", self.center_button_input)
-        center_form.addRow("Click count", self.center_clicks_input)
+        center_form.addRow("Click count (2 = double-click)", self.center_clicks_input)
 
         self.offset_fields = QWidget()
         offset_form = QFormLayout(self.offset_fields)
@@ -106,13 +140,55 @@ class ActionDialog(QDialog):
         offset_form.addRow("X offset from center", self.offset_x_input)
         offset_form.addRow("Y offset from center", self.offset_y_input)
         offset_form.addRow("Mouse button", self.offset_button_input)
-        offset_form.addRow("Click count", self.offset_clicks_input)
+        offset_form.addRow("Click count (2 = double-click)", self.offset_clicks_input)
+
+        self.move_fields = QWidget()
+        move_form = QFormLayout(self.move_fields)
+        self.move_x_input = QSpinBox()
+        self.move_x_input.setRange(-100000, 100000)
+        self.move_y_input = QSpinBox()
+        self.move_y_input.setRange(-100000, 100000)
+        self.move_pick_button = QPushButton("Pick Position…")
+        self.move_pick_button.clicked.connect(
+            lambda: self._pick_position(self.move_x_input, self.move_y_input)
+        )
+        move_form.addRow("Screen X", self.move_x_input)
+        move_form.addRow("Screen Y", self.move_y_input)
+        move_form.addRow(self.move_pick_button)
+
+        self.scroll_fields = QWidget()
+        scroll_form = QFormLayout(self.scroll_fields)
+        self.scroll_direction_input = QComboBox()
+        self.scroll_direction_input.addItem("Vertical", "vertical")
+        self.scroll_direction_input.addItem("Horizontal", "horizontal")
+        self.scroll_amount_input = QSpinBox()
+        self.scroll_amount_input.setRange(-10000, 10000)
+        self.scroll_amount_input.setSpecialValueText("0")
+        scroll_form.addRow("Direction", self.scroll_direction_input)
+        scroll_form.addRow("Amount (negative reverses direction)", self.scroll_amount_input)
 
         self.press_fields = QWidget()
         press_form = QFormLayout(self.press_fields)
-        self.key_input = QLineEdit()
-        self.key_input.setPlaceholderText("For example: enter, space, or a")
+        self.key_input = QComboBox()
+        self.key_input.setEditable(True)
+        self.key_input.addItems(_common_keys())
+        self.key_input.setCurrentText("")
+        self.key_input.setToolTip("Choose a common key or type a supported key name.")
         press_form.addRow("Key", self.key_input)
+
+        self.text_fields = QWidget()
+        text_form = QFormLayout(self.text_fields)
+        self.text_input = QPlainTextEdit()
+        self.text_input.setMaximumHeight(100)
+        self.text_input.setPlaceholderText("Text to type")
+        text_form.addRow("Text", self.text_input)
+
+        self.hotkey_fields = QWidget()
+        hotkey_form = QFormLayout(self.hotkey_fields)
+        self.hotkey_input = QLineEdit()
+        self.hotkey_input.setPlaceholderText("ctrl, c")
+        self.hotkey_input.setToolTip("Enter two or more supported keys separated by commas.")
+        hotkey_form.addRow("Keys in order", self.hotkey_input)
 
         self.delay_fields = QWidget()
         delay_form = QFormLayout(self.delay_fields)
@@ -122,12 +198,73 @@ class ActionDialog(QDialog):
         self.seconds_input.setSuffix(" seconds")
         delay_form.addRow("Duration", self.seconds_input)
 
+        self.condition_fields = QWidget()
+        condition_layout = QVBoxLayout(self.condition_fields)
+        condition_form = QFormLayout()
+        self.condition_mode_input = QComboBox()
+        self.condition_mode_input.addItem("Wait until it appears", "appears")
+        self.condition_mode_input.addItem("Wait until it disappears", "disappears")
+        self.condition_path_input = QLineEdit()
+        self.condition_path_input.setPlaceholderText("Choose an image template")
+        self.condition_browse_button = QPushButton("Choose Image…")
+        self.condition_browse_button.clicked.connect(self._browse_condition_template)
+        path_row = QHBoxLayout()
+        path_row.addWidget(self.condition_path_input, 1)
+        path_row.addWidget(self.condition_browse_button)
+        self.condition_threshold_input = QSpinBox()
+        self.condition_threshold_input.setRange(0, 100)
+        self.condition_threshold_input.setValue(85)
+        self.condition_threshold_input.setSuffix("%")
+        self.condition_timeout_input = QDoubleSpinBox()
+        self.condition_timeout_input.setRange(0, 300)
+        self.condition_timeout_input.setDecimals(2)
+        self.condition_timeout_input.setSuffix(" seconds")
+        self.condition_interval_input = QDoubleSpinBox()
+        self.condition_interval_input.setRange(0.05, 10)
+        self.condition_interval_input.setDecimals(2)
+        self.condition_interval_input.setValue(0.25)
+        self.condition_interval_input.setSuffix(" seconds")
+        condition_form.addRow("Condition", self.condition_mode_input)
+        condition_form.addRow("Image template", path_row)
+        condition_form.addRow("Confidence threshold", self.condition_threshold_input)
+        condition_form.addRow("Timeout", self.condition_timeout_input)
+        condition_form.addRow("Check every", self.condition_interval_input)
+        condition_layout.addLayout(condition_form)
+        self.then_actions_label = QLabel("When detected, run:")
+        self.then_actions_builder = ActionBuilder([], self, action_depth=action_depth + 1)
+        self.else_actions_label = QLabel("When not detected before timeout, run:")
+        self.else_actions_builder = ActionBuilder([], self, action_depth=action_depth + 1)
+        condition_layout.addWidget(self.then_actions_label)
+        condition_layout.addWidget(self.then_actions_builder)
+        condition_layout.addWidget(self.else_actions_label)
+        condition_layout.addWidget(self.else_actions_builder)
+
+        self.repeat_fields = QWidget()
+        repeat_form = QVBoxLayout(self.repeat_fields)
+        repeat_count_form = QFormLayout()
+        self.repeat_count_input = QSpinBox()
+        self.repeat_count_input.setRange(1, 100)
+        repeat_count_form.addRow("Repeat count", self.repeat_count_input)
+        repeat_form.addLayout(repeat_count_form)
+        self.repeat_builder = ActionBuilder([], self, action_depth=action_depth + 1)
+        repeat_form.addWidget(QLabel("Actions to repeat"))
+        repeat_form.addWidget(self.repeat_builder)
+
         self.fields_stack = QStackedWidget()
-        self.fields_stack.addWidget(self.click_fields)
-        self.fields_stack.addWidget(self.center_fields)
-        self.fields_stack.addWidget(self.offset_fields)
-        self.fields_stack.addWidget(self.press_fields)
-        self.fields_stack.addWidget(self.delay_fields)
+        for fields in (
+            self.click_fields,
+            self.center_fields,
+            self.offset_fields,
+            self.move_fields,
+            self.scroll_fields,
+            self.press_fields,
+            self.text_fields,
+            self.hotkey_fields,
+            self.delay_fields,
+            self.condition_fields,
+            self.repeat_fields,
+        ):
+            self.fields_stack.addWidget(fields)
         self.type_input.currentIndexChanged.connect(self._update_fields)
         self.error_label = QLabel()
         self.error_label.setObjectName("action_error")
@@ -164,20 +301,104 @@ class ActionDialog(QDialog):
                 self.offset_button_input.setCurrentText(action.get("button", "left"))
                 self.offset_clicks_input.setValue(action.get("clicks", 1))
             elif action.get("type") == "press":
-                self.key_input.setText(action.get("key", ""))
+                self.key_input.setCurrentText(action.get("key", ""))
+            elif action.get("type") in {"key_down", "key_up"}:
+                self.key_input.setCurrentText(action.get("key", ""))
+            elif action.get("type") == "move":
+                self.move_x_input.setValue(action.get("x", 0))
+                self.move_y_input.setValue(action.get("y", 0))
+            elif action.get("type") == "scroll":
+                index = self.scroll_direction_input.findData(
+                    action.get("direction", "vertical")
+                )
+                self.scroll_direction_input.setCurrentIndex(max(0, index))
+                self.scroll_amount_input.setValue(action.get("amount", 1))
+            elif action.get("type") == "type_text":
+                self.text_input.setPlainText(action.get("text", ""))
+            elif action.get("type") == "hotkey":
+                self.hotkey_input.setText(", ".join(action.get("keys", [])))
+            elif action.get("type") == "repeat":
+                self.repeat_count_input.setValue(action.get("count", 1))
+                self.repeat_builder.set_actions(action.get("actions", []))
             elif action.get("type") == "delay":
                 self.seconds_input.setValue(action.get("seconds", 0))
+            elif action.get("type") in {"wait_image", "if_image"}:
+                mode_index = self.condition_mode_input.findData(
+                    action.get("condition", "appears")
+                )
+                self.condition_mode_input.setCurrentIndex(max(0, mode_index))
+                self.condition_path_input.setText(action.get("template_path", ""))
+                self.condition_threshold_input.setValue(
+                    round(action.get("threshold", 0.85) * 100)
+                )
+                self.condition_timeout_input.setValue(action.get("timeout", 10))
+                self.condition_interval_input.setValue(action.get("interval", 0.25))
+                self.then_actions_builder.set_actions(action.get("then_actions", []))
+                self.else_actions_builder.set_actions(action.get("else_actions", []))
         self._update_fields()
+        self._update_position_summary()
+
+    def _pick_position(
+        self,
+        x_input: QSpinBox | None = None,
+        y_input: QSpinBox | None = None,
+    ) -> None:
+        x_input = x_input or self.x_input
+        y_input = y_input or self.y_input
+        try:
+            mapper = ScreenCoordinateMapper.from_desktop()
+            overlay = ScreenPositionOverlay(mapper, self)
+            if overlay.exec() != QDialog.DialogCode.Accepted:
+                return
+            if overlay.selected_position is None:
+                self.error_label.setText("No screen position was selected.")
+                return
+            x, y = overlay.selected_position
+            x_input.setValue(x)
+            y_input.setValue(y)
+            self.error_label.clear()
+        except (RuntimeError, ValueError) as exc:
+            self.error_label.setText(f"Could not select a desktop position: {exc}")
+
+    def _update_position_summary(self) -> None:
+        self.position_summary.setText(
+            f"Executor coordinates: ({self.x_input.value()}, {self.y_input.value()})"
+        )
+
+    def _browse_condition_template(self) -> None:
+        path, _selected_filter = QFileDialog.getOpenFileName(
+            self,
+            "Choose Image Condition Template",
+            "",
+            "Image files (*.png *.jpg *.jpeg *.bmp *.webp)",
+        )
+        if path:
+            self.condition_path_input.setText(path)
 
     def _update_fields(self) -> None:
         field_index = {
             "click": 0,
             "click_center": 1,
             "click_offset": 2,
-            "press": 3,
-            "delay": 4,
+            "move": 3,
+            "scroll": 4,
+            "press": 5,
+            "type_text": 6,
+            "hotkey": 7,
+            "delay": 8,
+            "wait_image": 9,
+            "if_image": 9,
+            "repeat": 10,
+            "key_down": 5,
+            "key_up": 5,
         }[self.type_input.currentData()]
         self.fields_stack.setCurrentIndex(field_index)
+        is_branch = self.type_input.currentData() == "if_image"
+        self.condition_mode_input.setVisible(not is_branch)
+        self.then_actions_label.setVisible(is_branch)
+        self.then_actions_builder.setVisible(is_branch)
+        self.else_actions_label.setVisible(is_branch)
+        self.else_actions_builder.setVisible(is_branch)
 
     def action(self) -> dict[str, Any]:
         kind = self.type_input.currentData()
@@ -203,8 +424,52 @@ class ActionDialog(QDialog):
                 "button": self.offset_button_input.currentText(),
                 "clicks": self.offset_clicks_input.value(),
             }
-        elif kind == "press":
-            action = {"type": "press", "key": self.key_input.text().strip()}
+        elif kind in {"press", "key_down", "key_up"}:
+            action = {"type": kind, "key": self.key_input.currentText().strip()}
+        elif kind == "move":
+            action = {
+                "type": kind,
+                "x": self.move_x_input.value(),
+                "y": self.move_y_input.value(),
+            }
+        elif kind == "scroll":
+            action = {
+                "type": kind,
+                "direction": self.scroll_direction_input.currentData(),
+                "amount": self.scroll_amount_input.value(),
+            }
+        elif kind == "type_text":
+            action = {"type": kind, "text": self.text_input.toPlainText()}
+        elif kind == "hotkey":
+            action = {
+                "type": kind,
+                "keys": [key.strip() for key in self.hotkey_input.text().split(",") if key.strip()],
+            }
+        elif kind == "wait_image":
+            action = {
+                "type": kind,
+                "condition": self.condition_mode_input.currentData(),
+                "template_path": self.condition_path_input.text().strip(),
+                "threshold": self.condition_threshold_input.value() / 100,
+                "timeout": self.condition_timeout_input.value(),
+                "interval": self.condition_interval_input.value(),
+            }
+        elif kind == "if_image":
+            action = {
+                "type": kind,
+                "template_path": self.condition_path_input.text().strip(),
+                "threshold": self.condition_threshold_input.value() / 100,
+                "timeout": self.condition_timeout_input.value(),
+                "interval": self.condition_interval_input.value(),
+                "then_actions": deepcopy(self.then_actions_builder.actions),
+                "else_actions": deepcopy(self.else_actions_builder.actions),
+            }
+        elif kind == "repeat":
+            action = {
+                "type": kind,
+                "count": self.repeat_count_input.value(),
+                "actions": deepcopy(self.repeat_builder.actions),
+            }
         else:
             action = {"type": "delay", "seconds": self.seconds_input.value()}
         validate_action(action)
@@ -222,23 +487,41 @@ class ActionDialog(QDialog):
 class ActionBuilder(QWidget):
     """List editor that only creates action dictionaries understood by MacroExecutor."""
 
-    def __init__(self, actions: list[dict[str, Any]] | None = None, parent=None) -> None:
+    actions_changed = Signal()
+
+    def __init__(
+        self,
+        actions: list[dict[str, Any]] | None = None,
+        parent=None,
+        action_depth: int = 0,
+    ) -> None:
         super().__init__(parent)
         self.actions = deepcopy(actions or [])
+        self.action_depth = action_depth
         self.action_list = QTableWidget(0, 1)
-        self.action_list.setHorizontalHeaderLabels(["Macro sequence"])
+        self.action_list.setHorizontalHeaderLabels(["Actions in this macro"])
         self.action_list.horizontalHeader().setStretchLastSection(True)
         self.action_list.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         self.action_list.setSelectionMode(QTableWidget.SelectionMode.SingleSelection)
         self.action_list.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self.action_list.cellDoubleClicked.connect(lambda _row, _column: self._edit_action())
+        self.empty_state = QLabel(
+            "This macro has no actions yet. Add an action to define what it should do."
+        )
+        self.empty_state.setWordWrap(True)
+        self.empty_state.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.empty_state.setStyleSheet("color: #aab1bc; padding: 16px;")
 
-        self.add_button = QPushButton("Add")
-        self.edit_button = QPushButton("Edit")
-        self.duplicate_button = QPushButton("Duplicate")
-        self.remove_button = QPushButton("Remove")
+        self.add_button = QPushButton("Add Action…")
+        self.edit_button = QPushButton("Edit Action")
+        self.duplicate_button = QPushButton("Duplicate Action")
+        self.remove_button = QPushButton("Delete Action")
         self.up_button = QPushButton("Move Up")
         self.down_button = QPushButton("Move Down")
+        self.add_button.setToolTip("Add a mouse, keyboard, timing, or repeat action.")
+        self.edit_button.setToolTip("Edit the selected action's settings.")
+        self.duplicate_button.setToolTip("Insert a copy of the selected action after it.")
+        self.remove_button.setToolTip("Delete only the selected action from this macro.")
         self.add_button.clicked.connect(self._add_action)
         self.edit_button.clicked.connect(self._edit_action)
         self.duplicate_button.clicked.connect(self._duplicate_action)
@@ -258,6 +541,7 @@ class ActionBuilder(QWidget):
             buttons.addWidget(button)
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
+        layout.addWidget(self.empty_state)
         layout.addWidget(self.action_list)
         layout.addLayout(buttons)
         self._refresh()
@@ -266,31 +550,35 @@ class ActionBuilder(QWidget):
         return self.action_list.currentRow()
 
     def _add_action(self) -> None:
-        dialog = ActionDialog(self)
+        dialog = ActionDialog(self, action_depth=self.action_depth)
         if dialog.exec() == QDialog.DialogCode.Accepted:
             self.actions.append(dialog.action())
             self._refresh(select=len(self.actions) - 1)
+            self.actions_changed.emit()
 
     def _edit_action(self) -> None:
         row = self._selected_row()
         if not 0 <= row < len(self.actions):
             return
-        dialog = ActionDialog(self, self.actions[row])
+        dialog = ActionDialog(self, self.actions[row], action_depth=self.action_depth)
         if dialog.exec() == QDialog.DialogCode.Accepted:
             self.actions[row] = dialog.action()
             self._refresh(select=row)
+            self.actions_changed.emit()
 
     def _duplicate_action(self) -> None:
         row = self._selected_row()
         if 0 <= row < len(self.actions):
             self.actions.insert(row + 1, deepcopy(self.actions[row]))
             self._refresh(select=row + 1)
+            self.actions_changed.emit()
 
     def _remove_action(self) -> None:
         row = self._selected_row()
         if 0 <= row < len(self.actions):
             self.actions.pop(row)
             self._refresh(select=min(row, len(self.actions) - 1))
+            self.actions_changed.emit()
 
     def _move_action(self, offset: int) -> None:
         row = self._selected_row()
@@ -298,16 +586,223 @@ class ActionBuilder(QWidget):
         if 0 <= row < len(self.actions) and 0 <= target < len(self.actions):
             self.actions[row], self.actions[target] = self.actions[target], self.actions[row]
             self._refresh(select=target)
+            self.actions_changed.emit()
+
+    def set_actions(self, actions: list[dict[str, Any]]) -> None:
+        self.actions = deepcopy(actions)
+        self._refresh()
 
     def _refresh(self, select: int = -1) -> None:
+        has_actions = bool(self.actions)
+        self.empty_state.setVisible(not has_actions)
+        self.action_list.setVisible(has_actions)
         self.action_list.setRowCount(len(self.actions))
         for row, action in enumerate(self.actions):
             item = QTableWidgetItem(_action_summary(action))
+            icon_kind = action.get("type")
+            icon_pixmap = {
+                "click": QStyle.StandardPixmap.SP_ComputerIcon,
+                "click_center": QStyle.StandardPixmap.SP_ComputerIcon,
+                "click_offset": QStyle.StandardPixmap.SP_ComputerIcon,
+                "move": QStyle.StandardPixmap.SP_ArrowForward,
+                "scroll": QStyle.StandardPixmap.SP_ArrowDown,
+                "press": QStyle.StandardPixmap.SP_FileIcon,
+                "key_down": QStyle.StandardPixmap.SP_FileIcon,
+                "key_up": QStyle.StandardPixmap.SP_FileIcon,
+                "hotkey": QStyle.StandardPixmap.SP_FileDialogDetailedView,
+                "type_text": QStyle.StandardPixmap.SP_FileDialogContentsView,
+                "delay": QStyle.StandardPixmap.SP_MediaPause,
+                "repeat": QStyle.StandardPixmap.SP_BrowserReload,
+                "wait_image": QStyle.StandardPixmap.SP_MediaPlay,
+                "if_image": QStyle.StandardPixmap.SP_FileDialogListView,
+            }.get(icon_kind, QStyle.StandardPixmap.SP_FileIcon)
+            item.setIcon(self.style().standardIcon(icon_pixmap))
             item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEditable)
             self.action_list.setItem(row, 0, item)
         if 0 <= select < len(self.actions):
             self.action_list.selectRow(select)
         self.action_list.resizeRowsToContents()
+
+
+class MacroBuilder(QWidget):
+    """Manage named macro sequences and their actions independently."""
+
+    def __init__(self, macros: list[Macro], parent=None) -> None:
+        super().__init__(parent)
+        self.macros = deepcopy(macros)
+        self.macro_list = QTableWidget(0, 1)
+        self.macro_list.setHorizontalHeaderLabels(["Macros run when this rule triggers"])
+        self.macro_list.horizontalHeader().setStretchLastSection(True)
+        self.macro_list.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        self.macro_list.setSelectionMode(QTableWidget.SelectionMode.SingleSelection)
+        self.macro_list.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self.macro_list.currentCellChanged.connect(self._selection_changed)
+        self.macro_empty_state = QLabel(
+            "No macros yet. Add a macro to define an independent action sequence."
+        )
+        self.macro_empty_state.setWordWrap(True)
+        self.macro_empty_state.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.macro_empty_state.setStyleSheet("color: #aab1bc; padding: 10px;")
+
+        self.add_macro_button = QPushButton("Add macro…")
+        self.edit_macro_button = QPushButton("Rename macro…")
+        self.duplicate_macro_button = QPushButton("Duplicate macro")
+        self.remove_macro_button = QPushButton("Delete macro")
+        self.macro_up_button = QPushButton("Move macro up")
+        self.macro_down_button = QPushButton("Move macro down")
+        self.add_macro_button.clicked.connect(self._add_macro)
+        self.edit_macro_button.clicked.connect(self._edit_macro)
+        self.duplicate_macro_button.clicked.connect(self._duplicate_macro)
+        self.remove_macro_button.clicked.connect(self._delete_macro)
+        self.macro_up_button.clicked.connect(lambda: self._move_macro(-1))
+        self.macro_down_button.clicked.connect(lambda: self._move_macro(1))
+
+        macro_buttons = QHBoxLayout()
+        for button in (
+            self.add_macro_button,
+            self.edit_macro_button,
+            self.duplicate_macro_button,
+            self.remove_macro_button,
+            self.macro_up_button,
+            self.macro_down_button,
+        ):
+            macro_buttons.addWidget(button)
+
+        self.action_builder = ActionBuilder(
+            self.macros[0].actions if self.macros else []
+        )
+        self.action_builder.actions_changed.connect(self._sync_selected_actions)
+        self.macros_group = QGroupBox("Actions in selected macro")
+        actions_layout = QVBoxLayout(self.macros_group)
+        actions_layout.addWidget(self.action_builder)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.addWidget(self.macro_empty_state)
+        layout.addWidget(self.macro_list)
+        layout.addLayout(macro_buttons)
+        layout.addWidget(self.macros_group)
+        self._refresh_macros(select=0 if self.macros else -1)
+
+    @property
+    def actions(self) -> list[dict[str, Any]]:
+        return self.action_builder.actions
+
+    def _selected_macro(self) -> int:
+        return self.macro_list.currentRow()
+
+    def _sync_selected_actions(self, *_args) -> None:
+        row = self._selected_macro()
+        if 0 <= row < len(self.macros):
+            self.macros[row].actions = deepcopy(self.action_builder.actions)
+            self._refresh_macros(select=row)
+
+    def _selection_changed(self, current_row: int, *_args) -> None:
+        old_row = self._selected_macro_before_change
+        if 0 <= old_row < len(self.macros):
+            self.macros[old_row].actions = deepcopy(self.action_builder.actions)
+        if 0 <= current_row < len(self.macros):
+            self.action_builder.set_actions(self.macros[current_row].actions)
+        else:
+            self.action_builder.set_actions([])
+        self._selected_macro_before_change = current_row
+
+    def _refresh_macros(self, select: int = -1) -> None:
+        self._selected_macro_before_change = select
+        self.macro_empty_state.setVisible(not self.macros)
+        self.macro_list.setVisible(bool(self.macros))
+        self.macro_list.setRowCount(len(self.macros))
+        for row, macro in enumerate(self.macros):
+            item = QTableWidgetItem(f"{macro.name}  ·  {len(macro.actions)} action(s)")
+            item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEditable)
+            self.macro_list.setItem(row, 0, item)
+        if 0 <= select < len(self.macros):
+            self.macro_list.selectRow(select)
+            self.action_builder.set_actions(self.macros[select].actions)
+        else:
+            self.action_builder.set_actions([])
+        self.macros_group.setTitle(
+            "Actions in selected macro"
+            if self.macros
+            else "Actions (add a macro first)"
+        )
+
+    def _add_macro(self) -> None:
+        name, accepted = QInputDialog.getText(self, "Add macro", "Macro name:")
+        if not accepted or not name.strip():
+            return
+        if self._name_exists(name):
+            QMessageBox.warning(self, "Duplicate macro name", "Choose a unique macro name.")
+            return
+        self._sync_selected_actions()
+        self.macros.append(Macro(name.strip(), []))
+        self._refresh_macros(select=len(self.macros) - 1)
+
+    def _edit_macro(self) -> None:
+        row = self._selected_macro()
+        if not 0 <= row < len(self.macros):
+            return
+        name, accepted = QInputDialog.getText(
+            self, "Rename macro", "Macro name:", text=self.macros[row].name
+        )
+        if not accepted or not name.strip():
+            return
+        if self._name_exists(name, exclude=row):
+            QMessageBox.warning(self, "Duplicate macro name", "Choose a unique macro name.")
+            return
+        self.macros[row].name = name.strip()
+        self._refresh_macros(select=row)
+
+    def _duplicate_macro(self) -> None:
+        row = self._selected_macro()
+        if not 0 <= row < len(self.macros):
+            return
+        self._sync_selected_actions()
+        original = self.macros[row]
+        name = self._unique_copy_name(original.name)
+        self.macros.insert(row + 1, Macro(name, deepcopy(original.actions)))
+        self._refresh_macros(select=row + 1)
+
+    def _delete_macro(self) -> None:
+        row = self._selected_macro()
+        if not 0 <= row < len(self.macros):
+            return
+        macro = self.macros[row]
+        answer = QMessageBox.question(
+            self,
+            "Delete entire macro?",
+            f"Delete macro “{macro.name}” and all {len(macro.actions)} of its actions?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
+            QMessageBox.StandardButton.Cancel,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        self.macros.pop(row)
+        self._refresh_macros(select=min(row, len(self.macros) - 1))
+
+    def _move_macro(self, offset: int) -> None:
+        row = self._selected_macro()
+        target = row + offset
+        if 0 <= row < len(self.macros) and 0 <= target < len(self.macros):
+            self._sync_selected_actions()
+            self.macros[row], self.macros[target] = self.macros[target], self.macros[row]
+            self._refresh_macros(select=target)
+
+    def _name_exists(self, name: str, exclude: int = -1) -> bool:
+        normalized = name.strip().casefold()
+        return any(
+            index != exclude and macro.name.casefold() == normalized
+            for index, macro in enumerate(self.macros)
+        )
+
+    def _unique_copy_name(self, original: str) -> str:
+        base = f"Copy of {original}"
+        name = base
+        suffix = 2
+        while self._name_exists(name):
+            name = f"{base} ({suffix})"
+            suffix += 1
+        return name
 
 
 class RuleDialog(QDialog):
@@ -385,7 +880,7 @@ class RuleDialog(QDialog):
         self.advanced_region.setVisible(False)
         self.advanced_toggle.toggled.connect(self._toggle_advanced)
         self.region_enabled.toggled.connect(self._update_region_enabled)
-        self.select_region_button = QPushButton("Select Region…")
+        self.select_region_button = QPushButton("Select Region")
         self.select_region_button.clicked.connect(self._select_region)
         self.region_summary = QLabel(
             "Full screen" if not rule or not rule.region else self._format_region(rule.region)
@@ -404,11 +899,19 @@ class RuleDialog(QDialog):
         recognition_form.addRow("", self.advanced_toggle)
         recognition_form.addRow("", self.advanced_region)
 
-        self.action_builder = ActionBuilder(rule.actions if rule else [])
+        macros = (
+            deepcopy(rule.macros)
+            if rule and rule.macros
+            else [Macro("Default macro", deepcopy(rule.actions if rule else []))]
+        )
+        self.macro_builder = MacroBuilder(macros)
+        self.action_builder = self.macro_builder.action_builder
         actions_group = QGroupBox("Actions")
         actions_layout = QVBoxLayout(actions_group)
-        actions_layout.addWidget(QLabel("Actions run in order when the image is detected."))
-        actions_layout.addWidget(self.action_builder)
+        actions_layout.addWidget(
+            QLabel("Each macro runs in order when this rule detects its image.")
+        )
+        actions_layout.addWidget(self.macro_builder)
 
         self.cooldown_input = QDoubleSpinBox()
         self.cooldown_input.setRange(0, 3600)
@@ -587,6 +1090,14 @@ class RuleDialog(QDialog):
                 self.region_width.value(),
                 self.region_height.value(),
             )
+        macros = deepcopy(self.macro_builder.macros)
+        actions = deepcopy(macros[0].actions) if macros else []
+        saved_macros = (
+            macros
+            if len(macros) > 1
+            or (macros and macros[0].name != "Default macro")
+            else None
+        )
         return Rule(
             id=self._rule_id,
             name=self.name_input.text().strip(),
@@ -596,7 +1107,8 @@ class RuleDialog(QDialog):
             cooldown=self.cooldown_input.value(),
             repeat=self.repeat_input.isChecked(),
             enabled=self.enabled_input.isChecked(),
-            actions=deepcopy(self.action_builder.actions),
+            actions=actions,
+            macros=saved_macros,
         )
 
     def _validate_and_accept(self) -> None:
@@ -621,6 +1133,8 @@ class MainWindow(QMainWindow):
         self.worker: MacroWorker | None = None
         self._has_error = False
         self._persistent_log_error_reported = False
+        self._live_confirmed_this_session = False
+        self._mode_change_in_progress = False
         try:
             self.storage: ApplicationStorage | None = storage or ApplicationStorage()
             self.storage.initialize()
@@ -651,10 +1165,17 @@ class MainWindow(QMainWindow):
         self.interval_input.setDecimals(2)
         self.interval_input.setSuffix(" seconds")
         self.interval_input.setValue(1.0)
-        self.simulation_input = QCheckBox("Simulation mode")
+        self.simulation_input = QRadioButton("Simulation")
         self.simulation_input.setChecked(True)
-        self.simulation_input.setToolTip("When enabled, planned actions are logged but no input is sent.")
-        self.simulation_input.toggled.connect(self._update_mode_indicator)
+        self.simulation_input.setToolTip("Actions are logged but not executed.")
+        self.live_input = QRadioButton("Live Input")
+        self.live_input.setToolTip("Actions send real mouse and keyboard input.")
+        self.execution_mode_group = QButtonGroup(self)
+        self.execution_mode_group.setExclusive(True)
+        self.execution_mode_group.addButton(self.simulation_input)
+        self.execution_mode_group.addButton(self.live_input)
+        self.live_input.toggled.connect(self._live_mode_toggled)
+        self.simulation_input.toggled.connect(self._mode_radio_changed)
 
         self._create_toolbar()
 
@@ -677,8 +1198,6 @@ class MainWindow(QMainWindow):
         stats.addWidget(self.total_label)
         stats.addWidget(self.enabled_label)
         stats.addStretch(1)
-        stats.addWidget(self.mode_label)
-        stats.addWidget(self.simulation_input)
 
         self.add_button = QPushButton("＋  Add Rule")
         self.add_button.setObjectName("primaryAdd")
@@ -705,8 +1224,16 @@ class MainWindow(QMainWindow):
         run_controls.addWidget(self.add_button)
         run_controls.addWidget(self.test_button)
         run_controls.addStretch(1)
+        run_controls.addWidget(self.simulation_input)
+        run_controls.addWidget(self.live_input)
+        run_controls.addWidget(self.mode_label)
         run_controls.addWidget(self.start_button)
         run_controls.addWidget(self.stop_button)
+        self.mode_help_label = QLabel(
+            "Simulation: actions are logged but not executed.  "
+            "Live Input: actions send real mouse and keyboard input."
+        )
+        self.mode_help_label.setStyleSheet("color: #aab1bc;")
 
         self.rule_table = QTableWidget(0, 6)
         self.rule_table.setHorizontalHeaderLabels(
@@ -751,6 +1278,7 @@ class MainWindow(QMainWindow):
         layout.addLayout(header)
         layout.addLayout(stats)
         layout.addLayout(run_controls)
+        layout.addWidget(self.mode_help_label)
         layout.addWidget(self.rule_stack, 1)
         layout.addWidget(self.log_toggle)
         layout.addWidget(self.log_panel)
@@ -807,10 +1335,10 @@ class MainWindow(QMainWindow):
             self,
             "Delete rule?",
             f"Delete “{rule.name}”? This cannot be undone.",
-            QMessageBox.StandardButton.Delete | QMessageBox.StandardButton.Cancel,
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
             QMessageBox.StandardButton.Cancel,
         )
-        if answer != QMessageBox.StandardButton.Delete:
+        if answer != QMessageBox.StandardButton.Yes:
             return
         self.rules.pop(row)
         self._refresh_rules()
@@ -846,6 +1374,10 @@ class MainWindow(QMainWindow):
         if not any(rule.enabled for rule in profile.rules):
             self._log_error("Add or enable at least one rule before starting.")
             return
+        self._log(
+            "Starting monitoring in "
+            f"{'Simulation (actions logged, not executed)' if profile.simulation else 'Live Input (real mouse/keyboard input)'} mode."
+        )
         self._launch_worker(profile.rules)
 
     def _launch_worker(self, rules: list[Rule], once: bool = False) -> None:
@@ -887,7 +1419,13 @@ class MainWindow(QMainWindow):
         self._set_status("Error")
 
     def _set_running_controls(self, running: bool) -> None:
-        for button in (self.add_button, self.test_button, self.start_button):
+        for button in (
+            self.add_button,
+            self.test_button,
+            self.start_button,
+            self.simulation_input,
+            self.live_input,
+        ):
             button.setEnabled(not running)
         self.stop_button.setEnabled(running)
         self.rule_table.setEnabled(not running)
@@ -908,15 +1446,61 @@ class MainWindow(QMainWindow):
             return
         simulation = self.simulation_input.isChecked()
         self.mode_label.setText(
-            "SIMULATION — planned actions only"
+            "SIMULATION · logged only"
             if simulation
-            else "LIVE INPUT — sends real mouse/keyboard input"
+            else "● LIVE INPUT · real input"
         )
         self.mode_label.setStyleSheet(
-            "color: #7ee0ae; font-weight: 600;"
+            "color: #7ee0ae; font-weight: 700; padding: 5px;"
             if simulation
-            else "color: #ff8178; font-weight: 700;"
+            else "color: #ff8178; background: #3a2022; font-weight: 800; padding: 5px;"
         )
+
+    def _mode_radio_changed(self, checked: bool) -> None:
+        if checked and not self._mode_change_in_progress:
+            self._update_mode_indicator()
+            self._log("Execution mode set to Simulation: actions are logged but not executed.")
+            self._persist_ui_settings()
+
+    def _live_mode_toggled(self, checked: bool) -> None:
+        if not checked or self._mode_change_in_progress:
+            return
+        if not self._live_confirmed_this_session:
+            answer = QMessageBox.warning(
+                self,
+                "Enable Live Input?",
+                "Live Input sends real mouse clicks and keyboard presses to your desktop. "
+                "Only enable it if you trust every configured rule and macro.",
+                QMessageBox.StandardButton.Cancel | QMessageBox.StandardButton.Yes,
+                QMessageBox.StandardButton.Cancel,
+            )
+            if answer != QMessageBox.StandardButton.Yes:
+                self._mode_change_in_progress = True
+                self.simulation_input.setChecked(True)
+                self._mode_change_in_progress = False
+                self._update_mode_indicator()
+                self._log(
+                    "Live Input activation was cancelled. Simulation remains active; "
+                    "actions are logged but not executed."
+                )
+                return
+            self._live_confirmed_this_session = True
+        self._update_mode_indicator()
+        self._log("Execution mode set to Live Input: actions send real mouse and keyboard input.")
+        self._persist_ui_settings()
+
+    def _select_execution_mode(self, simulation: bool) -> bool:
+        if simulation:
+            self.simulation_input.setChecked(True)
+            self._update_mode_indicator()
+            if not self.simulation_input.signalsBlocked():
+                self._log(
+                    "Execution mode set to Simulation: actions are logged but not executed."
+                )
+                self._persist_ui_settings()
+            return True
+        self.live_input.setChecked(True)
+        return self.live_input.isChecked()
 
     def _toggle_log(self, expanded: bool) -> None:
         self.log_panel.setVisible(expanded)
@@ -981,6 +1565,19 @@ class MainWindow(QMainWindow):
         except StorageError as exc:
             self._log_error(f"Profile was saved, but settings could not be updated: {exc}")
 
+    def _persist_ui_settings(self) -> None:
+        if self.storage is None:
+            return
+        try:
+            settings = self.storage.load_settings()
+            settings["interval"] = self.interval_input.value()
+            settings["simulation"] = self.simulation_input.isChecked()
+            if self.profile_path is not None:
+                settings["last_profile"] = str(self.profile_path)
+            self.storage.save_settings(settings)
+        except StorageError as exc:
+            self._log_error(f"Execution mode changed, but settings could not be saved: {exc}")
+
     def _restore_last_profile(self) -> None:
         if self.storage is None:
             return
@@ -993,7 +1590,11 @@ class MainWindow(QMainWindow):
                 simulation=stored_simulation,
             )
             self.interval_input.setValue(restored_settings.interval)
-            self.simulation_input.setChecked(restored_settings.simulation)
+            if not self._select_execution_mode(restored_settings.simulation):
+                self._log(
+                    "Saved settings requested Live Input, but it was not confirmed. "
+                    "Simulation remains active."
+                )
             profile_value = settings.get("last_profile")
             if not isinstance(profile_value, str) or not profile_value:
                 return
@@ -1011,7 +1612,16 @@ class MainWindow(QMainWindow):
     def _apply_profile(self, profile: Profile) -> None:
         self.rules = profile.rules.copy()
         self.interval_input.setValue(profile.interval)
-        self.simulation_input.setChecked(profile.simulation)
+        if not self._select_execution_mode(profile.simulation):
+            self._log(
+                "Profile is configured for Live Input, but it was not confirmed. "
+                "Simulation remains active."
+            )
+        else:
+            self._log(
+                "Profile execution mode: "
+                f"{'Simulation (actions logged, not executed)' if profile.simulation else 'Live Input (real mouse/keyboard input)'}."
+            )
         self._refresh_rules()
 
     def _refresh_rules(self) -> None:
@@ -1052,7 +1662,7 @@ class MainWindow(QMainWindow):
 
             for column, text in (
                 (1, f"{rule.threshold:.0%}"),
-                (2, _actions_summary(rule.actions)),
+                (2, _rule_macros_summary(rule)),
                 (3, f"{rule.cooldown:g}s"),
             ):
                 item = QTableWidgetItem(text)
@@ -1128,10 +1738,49 @@ def _action_summary(action: dict[str, Any]) -> str:
             + (f" ×{count}" if count > 1 else "")
         )
     if kind == "press":
-        return f"Press {action.get('key', '?')}"
+        return f"Press key {action.get('key', '?')}"
+    if kind == "key_down":
+        return f"Hold key {action.get('key', '?')}"
+    if kind == "key_up":
+        return f"Release key {action.get('key', '?')}"
+    if kind == "hotkey":
+        return f"Press {'+'.join(action.get('keys', []))}"
+    if kind == "type_text":
+        text = action.get("text", "")
+        preview = text.replace("\n", " ")
+        return f"Type {preview[:32]!r}" + ("…" if len(preview) > 32 else "")
+    if kind == "move":
+        return f"Move mouse to ({action.get('x')}, {action.get('y')})"
+    if kind == "scroll":
+        return f"{action.get('direction', 'vertical').title()} scroll {action.get('amount')}"
     if kind == "delay":
         return f"Wait {action.get('seconds', '?')}s"
+    if kind == "repeat":
+        return f"Repeat {len(action.get('actions', []))} actions ×{action.get('count', '?')}"
+    if kind == "wait_image":
+        image = Path(action.get("template_path", "")).name or "image"
+        return (
+            f"Wait for image to {action.get('condition', 'appear')}: {image} "
+            f"({action.get('timeout', '?')}s timeout)"
+        )
+    if kind == "if_image":
+        image = Path(action.get("template_path", "")).name or "image"
+        return (
+            f"Branch on {image}: {len(action.get('then_actions', []))} detected / "
+            f"{len(action.get('else_actions', []))} timeout actions"
+        )
     return f"Unsupported action: {kind}"
+
+
+def _common_keys() -> list[str]:
+    return [
+        "enter", "space", "tab", "esc", "backspace", "delete", "insert",
+        "home", "end", "pageup", "pagedown", "up", "down", "left", "right",
+        "ctrl", "alt", "shift", "win", "capslock",
+        *(f"f{number}" for number in range(1, 13)),
+        *"abcdefghijklmnopqrstuvwxyz",
+        *"0123456789",
+    ]
 
 
 def _actions_summary(actions: list[dict[str, Any]]) -> str:
@@ -1141,6 +1790,14 @@ def _actions_summary(actions: list[dict[str, Any]]) -> str:
     if len(actions) > 2:
         summary += f" → +{len(actions) - 2} more"
     return summary
+
+
+def _rule_macros_summary(rule: Rule) -> str:
+    if not rule.macros:
+        return _actions_summary(rule.actions)
+    names = ", ".join(macro.name for macro in rule.macros)
+    action_count = sum(len(macro.actions) for macro in rule.macros)
+    return f"{len(rule.macros)} macro(s): {names} · {action_count} action(s)"
 
 
 def main() -> int:

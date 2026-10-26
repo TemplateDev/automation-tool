@@ -1,8 +1,8 @@
 from PySide6.QtCore import QEventLoop, QTimer
 from PySide6.QtGui import QCloseEvent
 
-from visual_macro.gui import ActionBuilder, ActionDialog, MainWindow, RuleDialog
-from visual_macro.models import Profile, Rule
+from visual_macro.gui import ActionBuilder, ActionDialog, MainWindow, MacroBuilder, RuleDialog
+from visual_macro.models import Macro, Profile, Rule
 from visual_macro.storage import ApplicationStorage
 
 
@@ -30,6 +30,75 @@ def test_fixed_action_editor_preserves_negative_monitor_coordinates(qapp) -> Non
     assert dialog.action()["y"] == -40
 
 
+def test_action_editor_uses_picked_position_without_changing_profile_shape(
+    qapp, monkeypatch
+) -> None:
+    from PySide6.QtWidgets import QDialog
+    import visual_macro.gui as gui
+
+    class Mapper:
+        @classmethod
+        def from_desktop(cls):
+            return cls()
+
+    class Overlay:
+        selected_position = (-180, 20)
+
+        def __init__(self, _mapper, _parent):
+            pass
+
+        def exec(self):
+            return QDialog.DialogCode.Accepted
+
+    monkeypatch.setattr(gui.ScreenCoordinateMapper, "from_desktop", Mapper.from_desktop)
+    monkeypatch.setattr(gui, "ScreenPositionOverlay", Overlay)
+    dialog = ActionDialog(action={"type": "click", "x": 1, "y": 2})
+
+    dialog._pick_position()
+
+    assert (dialog.x_input.value(), dialog.y_input.value()) == (-180, 20)
+    assert dialog.position_summary.text() == "Executor coordinates: (-180, 20)"
+    assert dialog.action() == {
+        "type": "click",
+        "x": -180,
+        "y": 20,
+        "button": "left",
+        "clicks": 1,
+    }
+    from visual_macro.macros import MacroExecutor
+
+    planned = []
+    MacroExecutor(simulation=True, log=planned.append).execute([dialog.action()])
+    assert planned == ["SIMULATION: click left at (-180, 20) x1"]
+
+
+def test_action_editor_cancelled_position_pick_keeps_coordinates(qapp, monkeypatch) -> None:
+    from PySide6.QtWidgets import QDialog
+    import visual_macro.gui as gui
+
+    class Mapper:
+        @classmethod
+        def from_desktop(cls):
+            return cls()
+
+    class Overlay:
+        selected_position = None
+
+        def __init__(self, _mapper, _parent):
+            pass
+
+        def exec(self):
+            return QDialog.DialogCode.Rejected
+
+    monkeypatch.setattr(gui.ScreenCoordinateMapper, "from_desktop", Mapper.from_desktop)
+    monkeypatch.setattr(gui, "ScreenPositionOverlay", Overlay)
+    dialog = ActionDialog(action={"type": "click", "x": -12, "y": 34})
+
+    dialog._pick_position()
+
+    assert (dialog.x_input.value(), dialog.y_input.value()) == (-12, 34)
+
+
 def test_action_dialog_creates_center_and_offset_actions(qapp) -> None:
     center = ActionDialog()
     center.type_input.setCurrentIndex(center.type_input.findData("click_center"))
@@ -52,6 +121,73 @@ def test_action_dialog_creates_center_and_offset_actions(qapp) -> None:
         "button": "left",
         "clicks": 1,
     }
+
+
+def test_action_dialog_builds_mouse_keyboard_and_repeat_actions(qapp) -> None:
+    dialog = ActionDialog()
+    dialog.type_input.setCurrentIndex(dialog.type_input.findData("move"))
+    dialog.move_x_input.setValue(-50)
+    dialog.move_y_input.setValue(75)
+    assert dialog.action() == {"type": "move", "x": -50, "y": 75}
+
+    dialog.type_input.setCurrentIndex(dialog.type_input.findData("scroll"))
+    dialog.scroll_direction_input.setCurrentIndex(
+        dialog.scroll_direction_input.findData("horizontal")
+    )
+    dialog.scroll_amount_input.setValue(-4)
+    assert dialog.action() == {
+        "type": "scroll",
+        "direction": "horizontal",
+        "amount": -4,
+    }
+
+    dialog.type_input.setCurrentIndex(dialog.type_input.findData("hotkey"))
+    dialog.hotkey_input.setText("ctrl, c")
+    assert dialog.action() == {"type": "hotkey", "keys": ["ctrl", "c"]}
+
+    dialog.type_input.setCurrentIndex(dialog.type_input.findData("type_text"))
+    dialog.text_input.setPlainText("hello world")
+    assert dialog.action() == {"type": "type_text", "text": "hello world"}
+
+    dialog.type_input.setCurrentIndex(dialog.type_input.findData("repeat"))
+    dialog.repeat_count_input.setValue(3)
+    dialog.repeat_builder.set_actions([{"type": "press", "key": "enter"}])
+    assert dialog.action() == {
+        "type": "repeat",
+        "count": 3,
+        "actions": [{"type": "press", "key": "enter"}],
+    }
+    dialog.close()
+
+
+def test_action_dialog_builds_visual_waits_and_image_branches(qapp) -> None:
+    dialog = ActionDialog()
+    dialog.type_input.setCurrentIndex(dialog.type_input.findData("wait_image"))
+    dialog.condition_mode_input.setCurrentIndex(
+        dialog.condition_mode_input.findData("disappears")
+    )
+    dialog.condition_path_input.setText("spinner.png")
+    dialog.condition_threshold_input.setValue(92)
+    dialog.condition_timeout_input.setValue(5)
+    wait_action = dialog.action()
+    assert wait_action == {
+        "type": "wait_image",
+        "condition": "disappears",
+        "template_path": "spinner.png",
+        "threshold": 0.92,
+        "timeout": 5,
+        "interval": 0.25,
+    }
+
+    dialog.type_input.setCurrentIndex(dialog.type_input.findData("if_image"))
+    dialog.condition_path_input.setText("ready.png")
+    dialog.then_actions_builder.set_actions([{"type": "press", "key": "enter"}])
+    dialog.else_actions_builder.set_actions([{"type": "press", "key": "esc"}])
+    branch_action = dialog.action()
+    assert branch_action["type"] == "if_image"
+    assert branch_action["then_actions"] == [{"type": "press", "key": "enter"}]
+    assert branch_action["else_actions"] == [{"type": "press", "key": "esc"}]
+    dialog.close()
 
 
 def test_action_builder_duplicates_reorders_and_removes_actions(qapp) -> None:
@@ -115,6 +251,140 @@ def test_main_window_status_summary_and_simulation_default(qapp) -> None:
     window._on_worker_error("test failure")
     assert window.status_indicator.text().endswith("Error")
     window.close()
+
+
+def test_live_input_requires_confirmation_and_cancel_keeps_simulation(
+    qapp, monkeypatch
+) -> None:
+    from PySide6.QtWidgets import QMessageBox
+
+    window = MainWindow()
+    answers = iter(
+        [
+            QMessageBox.StandardButton.Cancel,
+            QMessageBox.StandardButton.Yes,
+        ]
+    )
+    monkeypatch.setattr(QMessageBox, "warning", lambda *_args: next(answers))
+
+    window.live_input.setChecked(True)
+
+    assert window.simulation_input.isChecked()
+    assert not window._live_confirmed_this_session
+    assert "Simulation remains active" in window.log_panel.toPlainText()
+
+    window.live_input.setChecked(True)
+
+    assert window.live_input.isChecked()
+    assert not window.simulation_input.isChecked()
+    assert window._live_confirmed_this_session
+    assert "LIVE INPUT" in window.mode_label.text()
+    assert window.storage.load_settings()["simulation"] is False
+    window.close()
+
+
+def test_live_profile_does_not_bypass_first_session_confirmation(
+    qapp, monkeypatch
+) -> None:
+    from PySide6.QtWidgets import QMessageBox
+
+    window = MainWindow()
+    monkeypatch.setattr(
+        QMessageBox,
+        "warning",
+        lambda *_args: QMessageBox.StandardButton.Cancel,
+    )
+
+    window._apply_profile(Profile(simulation=False))
+
+    assert window.simulation_input.isChecked()
+    assert not window._live_confirmed_this_session
+    assert "was not confirmed" in window.log_panel.toPlainText()
+    window.close()
+
+
+def test_macro_builder_can_add_duplicate_reorder_and_delete_whole_macro(
+    qapp, monkeypatch
+) -> None:
+    from PySide6.QtWidgets import QMessageBox
+
+    builder = MacroBuilder(
+        [
+            Macro("First", [{"type": "press", "key": "enter"}]),
+            Macro("Second", [{"type": "delay", "seconds": 0.5}]),
+        ]
+    )
+    builder.macro_list.selectRow(0)
+    builder._duplicate_macro()
+    assert [macro.name for macro in builder.macros] == ["First", "Copy of First", "Second"]
+    builder._move_macro(1)
+    assert [macro.name for macro in builder.macros] == ["First", "Second", "Copy of First"]
+    builder.macro_list.selectRow(1)
+    monkeypatch.setattr(
+        QMessageBox,
+        "question",
+        lambda *_args: QMessageBox.StandardButton.Yes,
+    )
+
+    builder._delete_macro()
+
+    assert [macro.name for macro in builder.macros] == ["First", "Copy of First"]
+    assert builder.action_builder.actions == [{"type": "press", "key": "enter"}]
+
+
+def test_macro_builder_adds_and_renames_macro(qapp, monkeypatch) -> None:
+    from PySide6.QtWidgets import QInputDialog
+
+    answers = iter([("New macro", True), ("Renamed macro", True)])
+    monkeypatch.setattr(QInputDialog, "getText", lambda *_args, **_kwargs: next(answers))
+    builder = MacroBuilder([Macro("Default macro", [])])
+
+    builder._add_macro()
+    assert [macro.name for macro in builder.macros] == ["Default macro", "New macro"]
+    builder._edit_macro()
+
+    assert [macro.name for macro in builder.macros] == ["Default macro", "Renamed macro"]
+
+
+def test_action_delete_removes_only_selected_action(qapp) -> None:
+    builder = ActionBuilder(
+        [
+            {"type": "press", "key": "enter"},
+            {"type": "delay", "seconds": 0.5},
+        ]
+    )
+    builder.action_list.selectRow(0)
+
+    builder._remove_action()
+
+    assert builder.actions == [{"type": "delay", "seconds": 0.5}]
+    assert builder.empty_state.isHidden()
+    builder._remove_action()
+    assert builder.actions == []
+    assert not builder.empty_state.isHidden()
+    assert builder.action_list.isHidden()
+
+
+def test_rule_editor_preserves_named_macro_groups(qapp) -> None:
+    rule = Rule(
+        id="macro-rule",
+        name="Macro rule",
+        template_path="button.png",
+        actions=[{"type": "press", "key": "enter"}],
+        macros=[
+            Macro("Primary", [{"type": "press", "key": "enter"}]),
+            Macro("Secondary", [{"type": "delay", "seconds": 1}]),
+        ],
+    )
+    dialog = RuleDialog(rule=rule)
+
+    updated = dialog.rule()
+
+    assert [(macro.name, macro.actions) for macro in updated.macros] == [
+        ("Primary", [{"type": "press", "key": "enter"}]),
+        ("Secondary", [{"type": "delay", "seconds": 1.0}]),
+    ]
+    dialog.close()
 
 
 def test_window_shutdown_requests_stop_and_waits(qapp) -> None:

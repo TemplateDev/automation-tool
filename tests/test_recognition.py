@@ -31,6 +31,34 @@ def test_matcher_reports_full_screen_location_and_confidence(tmp_path) -> None:
     assert result.confidence >= 0.99
 
 
+def test_matcher_distinguishes_colors_with_identical_grayscale(tmp_path) -> None:
+    template = np.full((8, 8, 3), (255, 0, 0), dtype=np.uint8)
+    grayscale_equivalent = np.full((8, 8, 3), (0, 0, 98), dtype=np.uint8)
+    assert np.array_equal(
+        cv2.cvtColor(template, cv2.COLOR_BGR2GRAY),
+        cv2.cvtColor(grayscale_equivalent, cv2.COLOR_BGR2GRAY),
+    )
+    template_path = tmp_path / "blue-template.png"
+    assert cv2.imwrite(str(template_path), template)
+
+    frame = np.zeros((24, 32, 3), dtype=np.uint8)
+    frame[4:12, 2:10] = grayscale_equivalent
+    frame[14:22, 20:28] = template
+    rule = Rule(
+        id="color-target",
+        name="Color target",
+        template_path=str(template_path),
+        threshold=0.99,
+    )
+
+    result = TemplateMatcher().match(frame, rule)
+
+    assert result.matched
+    assert result.location == (20, 14)
+    assert result.bbox == (20, 14, 8, 8)
+    assert result.confidence >= 0.99
+
+
 def test_match_bbox_includes_search_region_and_virtual_desktop_origin(tmp_path) -> None:
     rng = np.random.default_rng(12)
     template = rng.integers(0, 256, size=(6, 7), dtype=np.uint8)

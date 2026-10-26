@@ -45,7 +45,7 @@ class TemplateMatcher:
         cached = self._templates.get(str(path.resolve()))
         if cached is not None and cached[0] == modified:
             return cached[2]
-        template = cv2.imread(str(path), cv2.IMREAD_GRAYSCALE)
+        template = cv2.imread(str(path), cv2.IMREAD_COLOR)
         if template is None or template.size == 0:
             raise ValueError(f"Template for rule '{rule.name}' is not a readable image: {path}")
         self._templates[str(path.resolve())] = (modified, template.shape[1], template)
@@ -58,7 +58,9 @@ class TemplateMatcher:
         screen_origin: tuple[int, int] = (0, 0),
     ) -> Detection:
         template = self.ensure_template(rule)
-        screen = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        if frame.ndim != 3 or frame.shape[2] != 3:
+            raise ValueError("Screen frame must be a three-channel BGR image.")
+        screen = frame
         offset_x = 0
         offset_y = 0
         if rule.region is not None:
@@ -68,11 +70,11 @@ class TemplateMatcher:
             screen = screen[y : y + height, x : x + width]
             offset_x, offset_y = x, y
 
-        template_height, template_width = template.shape
+        template_height, template_width = template.shape[:2]
         if template_width > screen.shape[1] or template_height > screen.shape[0]:
             raise ValueError(f"Template for rule '{rule.name}' is larger than its search region.")
 
-        if float(np.std(template)) == 0:
+        if np.all(np.std(template, axis=(0, 1)) == 0):
             scores = cv2.matchTemplate(screen, template, cv2.TM_SQDIFF_NORMED)
             min_score, _, min_location, _ = cv2.minMaxLoc(scores)
             confidence = 1.0 - min_score

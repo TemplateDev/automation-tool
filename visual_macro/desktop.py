@@ -80,12 +80,40 @@ class ScreenCoordinateMapper:
         logical = mapping.logical
         physical = mapping.physical
         px = physical["left"] + round(
-            (x - logical.x()) * physical["width"] / max(1, logical.width())
+            (x - logical.x())
+            * max(0, physical["width"] - 1)
+            / max(1, logical.width() - 1)
         )
         py = physical["top"] + round(
-            (y - logical.y()) * physical["height"] / max(1, logical.height())
+            (y - logical.y())
+            * max(0, physical["height"] - 1)
+            / max(1, logical.height() - 1)
         )
         return px, py
+
+    def contains_logical_point(self, x: int, y: int) -> bool:
+        return any(mapping.logical.contains(x, y) for mapping in self._mappings)
+
+    def logical_point_for_screen(self, x: int, y: int) -> tuple[int, int] | None:
+        for mapping in self._mappings:
+            logical = mapping.logical
+            physical = mapping.physical
+            if (
+                physical["left"] <= x < physical["left"] + physical["width"]
+                and physical["top"] <= y < physical["top"] + physical["height"]
+            ):
+                logical_x = logical.x() + round(
+                    (x - physical["left"])
+                    * max(0, logical.width() - 1)
+                    / max(1, physical["width"] - 1)
+                )
+                logical_y = logical.y() + round(
+                    (y - physical["top"])
+                    * max(0, logical.height() - 1)
+                    / max(1, physical["height"] - 1)
+                )
+                return logical_x, logical_y
+        return None
 
     def map_rect(self, logical_rect: QRect) -> tuple[int, int, int, int]:
         rect = logical_rect.normalized()

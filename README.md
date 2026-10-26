@@ -25,17 +25,22 @@ Or, after installing, use `visual-macro`.
 3. Add steps in **Actions**. Use the visual builder to add, edit, duplicate, remove, and reorder actions:
    - Click the detected template center, with button and click count.
    - Click relative to the detected template center using signed X/Y pixel offsets.
-   - Click at fixed absolute screen coordinates, with button and click count.
-   - Press a key.
-   - Wait for a duration.
-4. Click **Select Region…** to draw the search area on the desktop. The advanced coordinate fields remain available; they use pixels relative to the captured virtual-desktop image. **Capture Template…** is separate: select an image crop, preview it, and save it as the rule's template.
+   - Click at fixed absolute screen coordinates, with button and click count. Use **Pick Position…** to choose a point directly on the desktop; coordinates are stored in the input executor's physical-pixel space.
+   - Move the mouse to a fixed or visually picked screen position.
+   - Scroll vertically or horizontally by a signed amount.
+   - Press, hold, or release a common key; enter a key combination such as `ctrl, c`; or type text.
+   - Wait for a duration or repeat a nested action sequence a fixed number of times (up to 100).
+   - Wait for a second image to appear/disappear, or choose detected/not-detected action branches after a timeout.
+4. Click **Select Region** to draw the search area on the desktop. The advanced coordinate fields remain available; they use pixels relative to the captured virtual-desktop image. **Capture Template…** is separate: select an image crop, preview it, and save it as the rule's template.
 5. In **Trigger Behavior**, set the cooldown and whether the rule can repeat while the image stays visible.
 6. Select a rule and click **Test Rule** to capture once, report match confidence/location (or the best confidence if absent), and preview its planned actions. A test never sends input, even when live mode is selected.
-7. Keep **Simulation mode** enabled (the default) to log planned actions without sending input. The mode indicator turns red and warns that mouse/keyboard input will be sent when live mode is selected.
+7. Choose **Simulation** or **Live Input** next to Start. Simulation logs actions but does not execute them. Live Input sends real mouse and keyboard input. Live Input requires explicit confirmation the first time it is activated in each session; its indicator is red and prominent. Simulation is selected by default, and loading a Live Input profile also requires confirmation.
 8. Click **Start** to monitor at the configured capture interval (default: 1 second), or **Stop** to stop. The status indicator reports Stopped, Running, or Error. Stopping takes effect between capture/matching steps or macro actions.
 9. Use the profile toolbar or **Profile** menu to save/load settings and JSON profiles. Template paths inside saved profiles are relative when possible.
 
 The activity log can be collapsed without losing its contents. A rule triggers on an absent-to-present transition; it must disappear before another trigger unless repeat is enabled. Repeat rules may trigger again after their cooldown while the match remains present.
+
+Each rule can contain multiple named macros. Every macro on a triggered rule runs in listed order. Use the macro controls to add, rename, duplicate, reorder, or delete a whole macro; use the separate action controls inside the selected macro to manage its individual steps. Deleting a macro confirms that all its actions will be removed. An empty macro is allowed and has its own helpful empty state. Stopping takes effect between actions and interrupts waits; if a live macro is stopped while holding a key, the executor makes a best-effort release before returning.
 
 ## Managed application data
 
@@ -70,7 +75,19 @@ Profiles use version 1 JSON. A minimal example:
       "actions": [
         {"type": "click", "x": 100, "y": 200, "button": "left", "clicks": 1},
         {"type": "delay", "seconds": 0.25},
-        {"type": "press", "key": "enter"}
+        {"type": "press", "key": "enter"},
+        {"type": "hotkey", "keys": ["ctrl", "c"]}
+      ],
+      "macros": [
+        {
+          "name": "Default macro",
+          "actions": [
+            {"type": "click", "x": 100, "y": 200, "button": "left", "clicks": 1},
+            {"type": "delay", "seconds": 0.25},
+            {"type": "press", "key": "enter"},
+            {"type": "hotkey", "keys": ["ctrl", "c"]}
+          ]
+        }
       ]
     }
   ]
@@ -81,7 +98,7 @@ The application validates profile values, action types, unique rule IDs, region 
 
 ### Existing configuration and Python interfaces
 
-Saved profile version 1 remains unchanged. The root contains `version`, `interval`, `simulation`, and `rules`. Each rule stores `id`, `name`, `template_path`, `threshold` (0–1), `region` (null or `[x, y, width, height]`), `cooldown`, `repeat`, `enabled`, and `actions`. Existing action objects remain:
+Saved profile version 1 remains valid. The root contains `version`, `interval`, `simulation`, and `rules`. Each rule stores `id`, `name`, `template_path`, `threshold` (0–1), `region` (null or `[x, y, width, height]`), `cooldown`, `repeat`, `enabled`, and the legacy `actions` list. A rule may additionally store `macros`, an ordered list of `{ "name": ..., "actions": [...] }` objects. For compatibility, newly saved named macros also mirror the first macro in the legacy `actions` field; old profiles without `macros` load as one “Default macro.” Thus older versions can still run the first macro. Existing action objects remain:
 
 ```json
 {"type": "click", "x": 100, "y": 200, "button": "left", "clicks": 1}
@@ -89,9 +106,23 @@ Saved profile version 1 remains unchanged. The root contains `version`, `interva
 {"type": "click_offset", "offset_x": -10, "offset_y": 5, "button": "right", "clicks": 1}
 {"type": "press", "key": "enter"}
 {"type": "delay", "seconds": 0.5}
+{"type": "move", "x": 320, "y": 240}
+{"type": "scroll", "direction": "vertical", "amount": 3}
+{"type": "type_text", "text": "example"}
+{"type": "hotkey", "keys": ["ctrl", "c"]}
+{"type": "key_down", "key": "shift"}
+{"type": "key_up", "key": "shift"}
+{"type": "repeat", "count": 2, "actions": [{"type": "press", "key": "enter"}]}
+{"type": "wait_image", "condition": "disappears", "template_path": "spinner.png", "threshold": 0.85, "timeout": 10, "interval": 0.25}
+{"type": "if_image", "template_path": "ready.png", "threshold": 0.9, "timeout": 2, "interval": 0.25, "then_actions": [{"type": "press", "key": "enter"}], "else_actions": [{"type": "press", "key": "esc"}]}
 ```
 
-The new relative actions are additive; all existing fixed-click, key, and delay profile actions remain valid. Relative clicks require a matched template rectangle. The matcher retains the legacy frame-relative `Detection.location` and also supplies `Detection.bbox` as a physical screen-space `(x, y, width, height)` rectangle. The macro executor accepts the optional `detection_rect` argument; existing `execute(actions)` callers and fixed-coordinate click behavior remain unchanged. Simulation logs the calculated physical click point.
+The new action dictionaries are additive; all existing fixed-click, key, and delay profile actions remain valid. Clicks support left, right, and middle buttons; a click count of `2` is a double-click. Scroll amounts are non-zero signed integers; vertical and horizontal directions select the corresponding PyAutoGUI wheel operation. Key combinations contain 2–5 supported key names. Repeat sequences contain at least one action and can be nested no more than five levels.
+
+Relative clicks require a matched template rectangle. The matcher retains the legacy frame-relative `Detection.location` and also supplies `Detection.bbox` as a physical screen-space `(x, y, width, height)` rectangle. The macro executor accepts the optional `detection_rect` argument; existing `execute(actions)` callers and fixed-coordinate click behavior remain unchanged. Simulation logs the calculated physical click point and each action in a repeat sequence. Before executing any action, the executor validates the entire sequence to avoid partially running a macro with a later invalid action.
+
+Image condition paths are validated before monitoring starts. `wait_image` polls until its selected appearance/disappearance condition is met; expiry reports a clear timeout error and stops the current monitoring worker. `if_image` polls for appearance until timeout, then runs only the matching branch; either branch may be empty. Both actions use the same OpenCV matcher as rules, run in the worker thread, respect Stop between polls, and are evaluated in Simulation without sending input.
+Text entry supports ASCII characters; newline and tab characters are sent as Enter and Tab key presses. PyAutoGUI does not provide general Unicode text entry without additional clipboard support, which this application intentionally does not add.
 
 On Windows, the application requests per-monitor DPI awareness before creating the Qt application. Region selection maps Qt's per-screen logical coordinates to MSS physical desktop pixels, including negative monitor origins; region values are then converted back to the existing frame-relative JSON coordinates. Mixed-DPI monitors and actual mouse injection should be verified on the target desktop.
 
@@ -118,7 +149,7 @@ These checks require an interactive Windows desktop. They have **not been run au
 
 ## Limitations and troubleshooting
 
-- Template matching is pixel-based; choose a crop that is distinctive and at the same scale and appearance as it will have on screen. Animations, scaling, theme changes, and overlays can reduce confidence.
+- Template matching compares BGR color pixels; choose a crop that is distinctive and at the same scale, color, and appearance as it will have on screen. Animations, scaling, theme changes, and overlays can reduce confidence.
 - Regions use coordinates in the captured virtual-screen image, with the origin at its top-left. A region must fit within the captured screen.
 - Capturing and controlling the desktop requires an interactive Windows session. A locked desktop, secure prompt, or disconnected remote session may prevent reliable capture/input.
 - PyAutoGUI may be blocked by Windows permissions or security software. Test in simulation first, then enable real input only when you trust the configured actions. PyAutoGUI's fail-safe behavior remains enabled.
